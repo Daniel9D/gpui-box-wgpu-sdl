@@ -1,0 +1,53 @@
+[package]
+name = "gpui-box-wgpu"
+version = "0.1.2"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+license = "Apache-2.0"
+description = "Embeddable wgpu renderer and generic host for GPUI Box"
+
+[lib]
+name = "gpui_wgpu"
+path = "src/gpui_wgpu.rs"
+
+[features]
+default = []
+font-kit = ["dep:font-kit"]
+host = ["gpui/test-support", "dep:image"]
+test-support = ["host"]
+
+[dependencies]
+gpui = { package = "gpui-box", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2" }
+collections = { package = "gpui-box-collections", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2" }
+gpui_util = { package = "gpui-box-util", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2" }
+anyhow = "1.0.86"
+bytemuck = "1"
+cosmic-text = "0.19.0"
+etagere = "0.2"
+font-kit = { package = "zed-font-kit", version = "0.14.1-zed", optional = true }
+image = { version = "0.25.1", optional = true, default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "rayon", "tga", "tiff", "webp"] }
+itertools = "0.14.0"
+log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
+parking_lot = "0.12.1"
+profiling = "1"
+raw-window-handle = "0.6"
+smallvec = { version = "1.6", features = ["union", "const_new"] }
+swash = "0.2.6"
+unicode-bidi = { version = "0.3.18", default-features = false, features = ["hardcoded-data"] }
+unicode-segmentation = "1.10"
+wgpu = "30.0.1"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+pollster = "0.4.0"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-bindgen = "0.2.120"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+js-sys = "0.3"
+wgpu = { version = "30.0.1", features = ["webgl"] }
+
+[dev-dependencies]
+env_logger = "0.11"
+naga = { version = "=30.0.0", features = ["wgsl-in"] }
