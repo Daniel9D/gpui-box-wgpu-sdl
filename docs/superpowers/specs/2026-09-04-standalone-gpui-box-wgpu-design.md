@@ -42,18 +42,28 @@ a Git revision.
 ## Package and feature model
 
 The repository root is a single library crate. Its default build exposes the
-native external-GPU rendering API without requiring screenshot support.
+native external-GPU rendering API without requiring screenshot or generic-host
+support.
 
 The existing features remain narrowly scoped:
 
 - `font-kit` enables system font discovery;
-- `test-support` enables GPUI test facilities and image capture; and
+- `host` enables `gpui/test-support`, the direct `image` dependency required
+  by GPUI's headless renderer trait, and the generic `WgpuHost` API;
+- `test-support` enables `host` and preserves the existing feature name for
+  compatibility; and
 - the default feature set remains empty.
 
 The `image` dependency stays optional and is not required for rendering a
 scene into a host texture. APIs whose signatures contain `image::RgbaImage`
-remain gated by `test-support`. The external renderer and generic host are not
-gated by `test-support` on native platforms.
+remain gated by `host`. The low-level external renderer is not gated by
+`host` or `test-support` on native platforms.
+
+This feature boundary is required by the pinned GPUI Box revision:
+`HeadlessAppContext`, `PlatformHeadlessRenderer`, and the synchronous scene
+dispatch hook are exported only by `gpui/test-support`. Making the generic
+host available without that feature would require maintaining a fork of the
+central `gpui-box` crate, which is deliberately outside scope.
 
 ## Low-level external renderer
 
@@ -99,8 +109,8 @@ retain the target view after the render call.
 
 ## Generic host API
 
-The crate adds a native `WgpuHost` that composes GPUI's headless application
-context with `WgpuHeadlessRenderer`. It owns:
+With the `host` feature, the crate adds a native `WgpuHost` that composes
+GPUI's headless application context with `WgpuHeadlessRenderer`. It owns:
 
 - `gpui::HeadlessAppContext`;
 - the logical GPUI window handle;
@@ -257,8 +267,9 @@ source baseline is copied unchanged.
    queue, renders into a texture from that device, reads it back only in the
    test, and verifies distinct expected pixels. It reports an explicit skip
    when no compatible adapter exists.
-5. `test-support` tests retain image-rendering coverage separately from the
-   default external-rendering path.
+5. `host` tests exercise the generic host and image-renderer bridge separately
+   from the default external-rendering path; `test-support` remains a
+   compatibility alias for this capability.
 6. Documentation examples are compiled where practical.
 
 Completion requires fresh successful runs of:
@@ -299,8 +310,9 @@ the future SDL input map.
 - The existing engine-facing external renderer API remains compatible.
 - External rendering is available without `test-support` or optional image
   capture dependencies.
-- `WgpuHost` can construct a caller-defined GPUI view, dispatch generic GPUI
-  input, accept committed text, and render directly into a host texture.
+- With `features = ["host"]`, `WgpuHost` can construct a caller-defined GPUI
+  view, dispatch generic GPUI input, accept committed text, and render directly
+  into a host texture.
 - Runtime rendering contains no full-frame readback or CPU upload.
 - The future SDL/IME/platform work is explicitly mapped without introducing an
   SDL dependency.
