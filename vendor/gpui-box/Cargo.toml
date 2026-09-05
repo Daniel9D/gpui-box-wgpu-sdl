@@ -1,0 +1,349 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/collections",
+  "crates/gpui",
+  "crates/gpui_linux",
+  "crates/gpui_macos",
+  "crates/gpui_macros",
+  "crates/gpui_platform",
+  "crates/gpui_shared_string",
+  "crates/gpui_util",
+  "crates/gpui_web",
+  "crates/gpui_wgpu",
+  "crates/gpui_windows",
+  "crates/http_client",
+  "crates/media",
+  "crates/refineable",
+  "crates/refineable/derive_refineable",
+  "crates/scheduler",
+  "crates/sum_tree",
+  "crates/util_macros",
+]
+default-members = ["crates/gpui"]
+# Its own workspace on purpose: the cross-platform visual harness has
+# renderer-specific dependencies and keeps an independent lockfile. Both
+# workspaces consume the same local GPUI Box packages. The vendored `block`
+# compatibility fork is a third-party package, not a workspace member.
+exclude = ["tools/headless-visual", "vendor/block"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.2"
+license = "MIT"
+repository = "https://github.com/fran0220/gpui-box"
+homepage = "https://github.com/fran0220/gpui-box"
+rust-version = "1.97"
+
+[workspace.dependencies]
+collections = { package = "gpui-box-collections", path = "crates/collections", version = "0.1.2" }
+gpui = { package = "gpui-box", path = "crates/gpui", version = "0.1.2" }
+gpui_linux = { package = "gpui-box-linux", path = "crates/gpui_linux", version = "0.1.2" }
+gpui_macos = { package = "gpui-box-macos", path = "crates/gpui_macos", version = "0.1.2" }
+gpui_macros = { package = "gpui-box-macros", path = "crates/gpui_macros", version = "0.1.2" }
+gpui_platform = { package = "gpui-box-platform", path = "crates/gpui_platform", version = "0.1.2" }
+gpui_shared_string = { package = "gpui-box-shared-string", path = "crates/gpui_shared_string", version = "0.1.2" }
+gpui_util = { package = "gpui-box-util", path = "crates/gpui_util", version = "0.1.2" }
+gpui_web = { package = "gpui-box-web", path = "crates/gpui_web", version = "0.1.2" }
+gpui_wgpu = { package = "gpui-box-wgpu", path = "crates/gpui_wgpu", version = "0.1.2" }
+gpui_windows = { package = "gpui-box-windows", path = "crates/gpui_windows", version = "0.1.2" }
+http_client = { package = "gpui-box-http-client", path = "crates/http_client", version = "0.1.2" }
+media = { package = "gpui-box-media", path = "crates/media", version = "0.1.2", default-features = false }
+refineable = { package = "gpui-box-refineable", path = "crates/refineable", version = "0.1.2" }
+derive_refineable = { package = "gpui-box-refineable-derive", path = "crates/refineable/derive_refineable", version = "0.1.2" }
+scheduler = { package = "gpui-box-scheduler", path = "crates/scheduler", version = "0.1.2" }
+sum_tree = { package = "gpui-box-sum-tree", path = "crates/sum_tree", version = "0.1.2" }
+util_macros = { package = "gpui-box-util-macros", path = "crates/util_macros", version = "0.1.2" }
+perf = { package = "perf", path = "tooling/perf", version = "0.1.2" }
+gpui-kit-assets = { package = "gpui-box-kit-assets", path = "crates/gpui-kit-assets", version = "0.1.2" }
+gpui-kit-semantics = { package = "gpui-box-kit-semantics", path = "crates/gpui-kit-semantics", version = "0.1.2" }
+gpui-kit-testkit = { package = "gpui-box-kit-testkit", path = "crates/gpui-kit-testkit", version = "0.1.2" }
+gpui-kit-theme = { package = "gpui-box-kit-theme", path = "crates/gpui-kit-theme", version = "0.1.2" }
+gpui-kit-tokens = { package = "gpui-box-kit-tokens", path = "crates/gpui-kit-tokens", version = "0.1.2" }
+gpui-kit = { package = "gpui-box-kit", path = "crates/gpui-kit", version = "0.1.2" }
+accesskit = { version = "0.24.0", features = ["enumn"] }
+# The escape-sequence state machine behind the terminal grid. Parsing and grid
+# state only: it opens no pty, spawns nothing, and reads no environment.
+alacritty_terminal = { version = "0.26", default-features = false }
+accesskit_macos = "0.26.0"
+accesskit_unix = "0.21.0"
+accesskit_windows = "0.33.1"
+anyhow = "1.0.86"
+ashpd = { version = "0.13", default-features = false, features = [
+    "async-io",
+    "notification",
+    "open_uri",
+    "file_chooser",
+    "settings",
+    "trash"
+] }
+async-channel = "2.5.0"
+async-compression = { version = "0.4", features = ["bzip2", "gzip", "futures-io"] }
+async-fs = "2.1"
+async-tar = "0.6"
+async-task = "4.7"
+backtrace = "0.3"
+base64 = "0.23"
+bitflags = "2.6.0"
+block = "0.1"
+block2 = "0.6"
+bytes = "1.0"
+cbindgen = { version = "0.28.0", default-features = false }
+chrono = { version = "0.4", features = ["serde"] }
+cocoa = "=0.26.0"
+cocoa-foundation = "=0.2.0"
+core-foundation = "0.10"
+core-foundation-sys = "0.8.6"
+core-graphics = "0.24"
+core-text = "21"
+core-video = { version = "0.5.2", features = ["metal"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+ctor = "1.0.6"
+derive_more = { version = "2.1.1", features = [
+    "add",
+    "add_assign",
+    "deref",
+    "deref_mut",
+    "display",
+    "from_str",
+    "mul",
+    "mul_assign",
+    "not",
+] }
+dunce = "1.0"
+env_logger = "0.11"
+etagere = "0.2"
+flume = "0.12"
+foreign-types = "0.5"
+futures = "0.3.32"
+futures-concurrency = "7.7.1"
+heapless = "0.9.2"
+heck = "0.5"
+hdrhistogram = "7"
+http = "1.1"
+http-body = "1.0"
+image = { version = "0.25.1", default-features = false, features = [
+    "bmp",
+    "dds",
+    "exr",
+    "ff",
+    "gif",
+    "hdr",
+    "ico",
+    "jpeg",
+    "png",
+    "pnm",
+    "qoi",
+    "rayon",
+    "tga",
+    "tiff",
+    "webp",
+] }
+indexmap = { version = "2.7.0", features = ["serde"] }
+inventory = "0.3.19"
+itertools = "0.14.0"
+jsonschema = { version = "0.33", default-features = false }
+libc = "0.2"
+log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
+mach2 = "0.5"
+metal = "0.33"
+notify-rust = "4"
+objc = "0.2"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSButton",
+    "NSControl",
+    "NSGraphics",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+    "objc2-core-foundation",
+] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = [
+    "NSArray",
+    "NSAttributedString",
+    "NSBundle",
+    "NSCoder",
+    "NSData",
+    "NSDate",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSError",
+    "NSGeometry",
+    "NSNotification",
+    "NSNull",
+    "NSObjCRuntime",
+    "NSObject",
+    "NSProcessInfo",
+    "NSRange",
+    "NSRunLoop",
+    "NSSet",
+    "NSString",
+    "NSURL",
+    "NSUndoManager",
+    "NSValue",
+    "objc2-core-foundation",
+    "std",
+] }
+objc2-user-notifications = "0.3"
+parking_lot = "0.12.1"
+pathfinder_geometry = "0.5"
+postage = { version = "0.5", features = ["futures-traits"] }
+proc-macro2 = "1.0.93"
+profiling = "1"
+proptest = { version = "1.10.0", features = ["attr-macro"] }
+pollster = "0.4.0"
+png = "=0.18.1"
+pulldown-cmark = { version = "0.13", default-features = false }
+quote = "1.0.9"
+rand = "0.9"
+rayon = "1.8"
+raw-window-handle = "0.6"
+rasterlottie = { version = "0.2.2", default-features = false, features = ["dotlottie", "images", "text"] }
+regex = "1.5"
+resvg = { version = "0.46.0", default-features = false, features = [
+    "text",
+    "system-fonts",
+    "memmap-fonts",
+    "raster-images",
+] }
+rustc-hash = "2.1.0"
+scap = { package = "zed-scap", version = "0.0.8-zed", default-features = false }
+schemars = { version = "1.0", features = ["indexmap2"] }
+semver = { version = "1.0", features = ["serde"] }
+serde = { version = "1.0.221", features = ["derive", "rc"] }
+serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
+serde_urlencoded = "0.7"
+sha2 = "0.10"
+slotmap = "1.0.6"
+smallvec = { version = "1.6", features = ["union", "const_new"] }
+smol = "2.0"
+stacksafe = "1.0"
+strum = { version = "0.27.2", features = ["derive"] }
+swash = "0.2.6"
+syn = { version = "2.0.101", features = ["full", "extra-traits", "visit-mut"] }
+tempfile = "3.20.0"
+thiserror = "2.0.12"
+toml = "0.8"
+tracing = "0.1.40"
+unicode-bidi = { version = "0.3.18", default-features = false, features = [
+    "hardcoded-data",
+] }
+unicode-segmentation = "1.10"
+url = "2.2"
+usvg = { version = "0.46.0", default-features = false }
+uuid = { version = "1.1.2", features = ["v4", "v5", "v7", "serde"] }
+which = "6.0.0"
+wasm-bindgen = "0.2.120"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1.7"
+web-time = "1.1.0"
+wgpu = "30.0.1"
+windows = { version = "0.61", features = [
+    "Data_Xml_Dom",
+    "Foundation_Numerics",
+    "Globalization_DateTimeFormatting",
+    "Storage_Search",
+    "Storage_Streams",
+    "System_Threading",
+    "UI_Notifications",
+    "UI_ViewManagement",
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_DirectManipulation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
+    "Win32_Graphics_Hlsl",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_DataExchange",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Performance",
+    "Win32_System_Pipes",
+    "Win32_System_RestartManager",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WinRT",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_Pointer",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Media",
+] }
+windows-capture = "=1.4.4"
+windows-core = "0.61"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(perf_enabled)", "cfg(rust_analyzer)", "cfg(feature, values(\"cargo-clippy\", \"nightly_coverage\"))"] }
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "warn"
+unwrap_used = "warn"
+
+# `block` 0.1.6 is the final upstream release and contains Rust
+# future-incompatibilities. Keep its API and ABI, but use the audited local
+# compatibility fork until the legacy Cocoa/Metal stack is replaced.
+[patch.crates-io]
+block = { path = "vendor/block" }
+
+# Backtraces need source locations, but routine builds and tests do not need
+# every local variable encoded into this large native dependency graph. This
+# substantially reduces link time and long-lived target size. Override with
+# `CARGO_PROFILE_DEV_DEBUG=full` (or TEST) for a debugger session.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+# Full scene captures encode the whole catalog, and the deflate inside is what
+# a debug build spends most of its time on. Optimizing just the
+# compression crates keeps scene rendering fast without giving up debug
+# builds for anything of ours.
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3

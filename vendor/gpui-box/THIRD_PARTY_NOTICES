@@ -1,0 +1,348 @@
+THIRD-PARTY NOTICES — GPUI Box
+================================================================================
+
+GPUI Box combines Apache-2.0 framework code with MIT kit/MCP code. Imported
+source and assets retain the licenses and attribution below. GPUI Box is an
+independent derivative and is not an official Zed Industries project.
+
+GPUI / Zed
+--------------------------------------------------------------------------------
+Official source: https://github.com/zed-industries/zed
+Bootstrap source: https://github.com/fran0220/zed
+Official baseline: a6a23c7b80a5cefa0487b7856335be89ace7e483
+Filtered bootstrap revision: 0b9c8dc932b65cba2dc87464148984e93f60ae18
+License: Apache-2.0
+Copyright 2022–2024 Zed Industries, Inc.
+
+Scope: filtered imported GPUI framework/support source, including platform,
+renderer, accessibility, input, and browser support. It is not a linked Git
+dependency. The frozen official and post-bootstrap fork-overlay receipts are in
+scripts/sync-zed/ and provenance.toml and are verified entirely offline; they
+are attribution records, not active update lanes. The later platform-view lifetime
+attachment, full-frame clipping, and macOS restacking are GPUI Box work and are
+not represented as imported Zed source.
+Nested window-control and explicit client-area precedence, vetoable
+programmatic close requests, current-request-position native caption hit tests,
+corrected Windows transparent-titlebar resize-frame metrics, and host-reserved
+Toast edges are GPUI Box work over existing platform and layout APIs and import
+no additional source. Native frame requests that synchronously re-enter while
+the application is already borrowed are deferred by GPUI Box while preserving
+their render and presentation intents; this window-lifecycle work likewise
+imports no source. Accessibility action registrations are also accepted only
+for frames in which the AccessKit adapter is active; this GPUI Box lifecycle
+correction imports no source. Grayscale glyph rasterization on transparent
+native scene-overlay planes and Direct3D offscreen-pass target restoration are
+GPUI Box renderer work and likewise import no source.
+The renderer-backed linear, elliptical radial, and conic gradient primitives
+for up to eight ordered stops, including their Metal, Direct3D, WGPU, and
+WebGL shaders, are GPUI Box work and import no additional source.
+The Metal monochrome-sprite contrast and gamma correction uses the same
+Microsoft Terminal / DirectWrite algorithm already present in the imported
+Direct3D and WGPU shaders; it is not a new third-party source drop.
+The composited sprite-batch ABI, atlas source rectangles, transforms, masks,
+tint modes, and normal/additive/screen pipeline states across those renderers
+are GPUI Box work and import no additional source or visual assets.
+The deterministic CPU particle sampler, bounded emitter API, procedural
+alpha-mask atlas, and policy-owned Kit recipes are GPUI Box work and import no
+additional source, shader, or visual assets.
+Normalized path-stroke trimming and wrapping dash offsets are GPUI Box work
+over the existing Lyon measurement and tessellation dependency and import no
+additional source.
+The read-only selectable-text primitive, bidi range geometry, pointer capture,
+clipboard behavior, bounded native external-data drag delivery, and AccessKit
+text-run publication are GPUI Box work and import no editor or product source.
+Rounded shaped-text backgrounds added with that primitive are GPUI Box work as
+well.
+The editable-text buffer, grapheme-safe edit/selection transactions, marked
+composition, grouped undo/redo, UTF-8/UTF-16 arithmetic, shaped editable
+geometry, alignment-aware hit testing, reveal scrolling, current-frame
+AccessKit character/run bounds, and generic normalized style runs are GPUI Box
+work and import no editor, document-format, grammar, or product source.
+The per-window labelled-by, described-by, and cross-tree active-descendant
+resolver, inverse relationship declarations, deferred-subtree resolution,
+focused-owner validation, stale-endpoint removal, and absent-scalar
+name/description fallback are GPUI Box work over AccessKit's existing
+relationship/focus projection and import no additional source.
+The resolved-focus prepaint observer and Kit diagnostic projection are GPUI Box
+work over the same explicit and framework-generated focus handles used by
+dispatch and AccessKit; they import no additional source.
+The window-owned document-selection coordinator, isolated selection scopes,
+virtualized-copy coverage, and generic scroll-target contract are GPUI Box work
+over existing framework state and import no editor, product, or third-party
+source.
+The inline sticky-subtree transform, deferred-prepaint clipping retention, and
+inset-aware focus reveal behavior are GPUI Box framework work over existing
+layout, input, and accessibility state and import no grid or third-party source.
+The measured `Reveal` subtree and content-mask-aware AccessKit bounds are GPUI
+Box framework work over those same authorities. They import no disclosure,
+animation, browser, product, or third-party source.
+The per-window structural frame counters, retained element-arena growth
+accounting, and deterministic 10,000-item Kit performance budgets are GPUI Box
+work and import no profiler, allocator, benchmark, or product source.
+The reference-counted frame-trace lease and bounded per-window timing monitor
+are GPUI Box work over those draw boundaries and import no profiler HUD,
+product, or third-party source.
+The AVFoundation and Media Foundation playback services are GPUI Box work and
+use operating-system frameworks; they import no additional third-party source
+or media assets.
+License text: licenses/ZED-APACHE-2.0.txt
+
+rasterlottie 0.2.2
+--------------------------------------------------------------------------------
+Source: https://github.com/neodyland/rasterlottie
+License: MIT OR Apache-2.0
+Copyright (c) 2026 neodyland contributors
+Scope: optional pure-Rust `.lottie` parsing and deterministic raster sampling
+behind the `gpui-box-kit/dotlottie` feature. GPUI Box supplies the bounded
+archive admission, public contracts, semantic recipes, playback intents,
+posters, and particle fallbacks. No animation asset is bundled.
+License texts are distributed in the crates.io package as `LICENSE-MIT` and
+`LICENSE-APACHE`.
+
+zip 8.6.0
+--------------------------------------------------------------------------------
+Source: https://github.com/zip-rs/zip2
+License: MIT
+Copyright (c) 2014 Mathijs van de Nes
+Scope: optional `.lottie` archive validation and bounded archive rebuilding.
+License text is distributed in the crates.io package as `LICENSE`.
+
+block 0.1.6
+--------------------------------------------------------------------------------
+Source: https://github.com/SSheldon/rust-block
+Revision/tag: 47178790cfc9d4a8b092051d8b413b78bd31254a (0.1.6)
+License: MIT
+Copyright (c) Steven Sheldon
+Scope: `vendor/block`, used by the legacy Cocoa, Core Video, and Metal bindings.
+GPUI Box changes the opaque Objective-C class marker from an uninhabited enum
+to an inhabited zero-sized C struct and spells the already-default C ABI on
+function pointers explicitly. The external symbol, pointer layout, block ABI,
+and public API are unchanged. Upstream 0.1.6 is the final release and does not
+contain these Rust future-compatibility fixes.
+License text: vendor/block/LICENSE
+
+Comet
+--------------------------------------------------------------------------------
+Source: https://github.com/zeronsh/comet
+Revision: fb22e269ac57331ee7aa4a9673530acf3299a886
+License: MIT
+Copyright (c) 2026 Wing
+Scope: theme geometry, motion, loader math, popover/dialog and settings
+scaffolding, frost, edge fade, font registration, and generic assets.
+License text: licenses/COMET-MIT.txt
+
+Hash Function Prospector — lowbias32
+--------------------------------------------------------------------------------
+Source: https://github.com/skeeto/hash-prospector
+Revision: 396dbe235c94dfc2e9b559fc965bcfda8b6a122c
+Author/discoverer: Christopher Wellons (skeeto)
+License: public-domain dedication under the Unlicense
+Scope: lowbias32 finalizer translated to Metal, HLSL, and WGSL for deterministic
+screen-pixel gradient dithering. GPUI Box supplies the pixel fold, salts, and
+triangular sample mapping.
+License text: licenses/HASH-PROSPECTOR-UNLICENSE.txt
+
+Geist and Geist Mono
+--------------------------------------------------------------------------------
+Source: https://vercel.com/font
+License: SIL Open Font License 1.1
+Copyright 2023 Vercel Inc.
+Scope: embedded fonts under crates/gpui-kit-assets/assets/fonts.
+License text: licenses/GEIST-OFL-1.1.txt
+
+Noto Sans Symbols and Noto Sans Symbols 2
+--------------------------------------------------------------------------------
+Source: https://github.com/notofonts/notofonts.github.io
+Revision: c16b117609abbe4e60b3f2bd4433bdb3d0accb2e
+Versions: 2.003 and 2.008
+License: SIL Open Font License 1.1, no Reserved Font Name
+Copyright 2022 The Noto Project Authors
+Scope: KeySymbols.ttf seven-glyph subset, renamed “GPUI Kit Key Symbols”.
+Recipe: crates/gpui-kit-assets/assets/SOURCE.md
+License text: licenses/NOTO-OFL-1.1.txt
+
+Noto Sans Arabic and Noto Sans Hebrew
+--------------------------------------------------------------------------------
+Source: https://github.com/google/fonts
+Revision: 352f6b7d9d6cc4fa9e242b931291d31b21a6dc84
+Versions: 2.012 and 3.001
+License: SIL Open Font License 1.1, no Reserved Font Name
+Copyright 2022 The Noto Project Authors (Arabic)
+Copyright 2022 The Noto Project Authors (Hebrew)
+Scope: deterministic script fallbacks under crates/gpui-kit-assets/assets/fonts.
+Checksums and exact upstream paths: crates/gpui-kit-assets/assets/SOURCE.md
+License text: licenses/NOTO-OFL-1.1.txt
+
+Noto Sans CJK SC
+--------------------------------------------------------------------------------
+Source: https://github.com/notofonts/noto-cjk
+Revision: f8d157532fbfaeda587e826d4cd5b21a49186f7c
+License: SIL Open Font License 1.1, no Reserved Font Name
+Copyright 2014-2021 Adobe (http://www.adobe.com/). Noto is a trademark of
+Google Inc.
+Scope: the Simplified Chinese script fallback under
+crates/gpui-kit-assets/assets/fonts.
+Checksums and exact upstream paths: crates/gpui-kit-assets/assets/SOURCE.md
+License text: licenses/NOTO-OFL-1.1.txt
+
+Phosphor Icons Core 2.1.1
+--------------------------------------------------------------------------------
+Source: https://github.com/phosphor-icons/core
+Revision: 2b75f3ad12b420c9504ef05df8d2564a28f8500e
+License: MIT
+Copyright (c) 2023 Phosphor Icons
+Scope: the controlled Regular and Fill subset under
+crates/gpui-kit-assets/assets/icons. Selection, checksums, and the exact import
+recipe live beside the assets.
+License text: crates/gpui-kit-assets/licenses/PHOSPHOR-MIT.txt
+
+IBM Plex Sans and Lilex
+--------------------------------------------------------------------------------
+Sources: https://github.com/IBM/plex and https://github.com/mishamyrt/Lilex
+License: SIL Open Font License 1.1
+
+Scope: framework test and fallback fonts under crates/gpui/assets/fonts,
+crates/gpui_web/assets/fonts, and crates/gpui_wgpu/assets/fonts. Each directory
+carries SOURCES.md and the applicable license text beside the font files.
+
+bezel
+--------------------------------------------------------------------------------
+Source: https://github.com/crabtalk/bezel
+Revision: 86b8997c0601ebcd416632ebde33d78f82b05917
+License: MIT
+Copyright (c) 2026 clearloop
+Copyright (c) 2026 Wing (portions extracted from zeronsh/comet)
+Scope: source-level port of the terminal emulator, its input encoding and its
+grid painter into crates/gpui-kit/src/content/terminal, and of the editable
+markdown document model into crates/gpui-kit/src/content/markdown/doc. Not a
+Cargo dependency; see PROVENANCE.md P10 for what was adapted.
+License text: licenses/BEZEL-MIT.txt
+
+bezel liquid-glass material measurements
+--------------------------------------------------------------------------------
+Source: https://github.com/crabtalk/bezel
+Revision: 2cfff23c96c6d33177a65d523f1827b0941b2eac
+License: MIT
+Copyright (c) 2026 clearloop
+Scope: measured clear-glass defaults and responsive material policy adapted
+into crates/gpui-kit/src/overlay/glass.rs and its effect tokens. Not a Cargo
+dependency; see PROVENANCE.md P12.
+License text: licenses/BEZEL-MIT.txt
+
+crabtalk/zed liquid-glass GPUI adaptation
+--------------------------------------------------------------------------------
+Source: https://github.com/crabtalk/zed
+Revision: ddd1c7d2cd98e1109f5bc4e21488c7ec8aefe198
+License: Apache-2.0
+Scope: dual sharp/blurred backdrop sources, spherical edge displacement,
+sharp-rim blending, additive lift and measured hairline adapted at the GPUI Box
+framework boundary across Metal, WGPU and Direct3D. No Git or Cargo dependency;
+see PROVENANCE.md P12. The fixed per-frame surface admission budget,
+replay-aware ordinary-fill fallback, and rejection of over-budget probe work
+are subsequent GPUI Box work and import no additional source.
+License text: licenses/ZED-APACHE-2.0.txt
+
+alacritty_terminal
+--------------------------------------------------------------------------------
+Source: https://github.com/alacritty/alacritty
+Version: 0.26.0 (crates.io)
+License: Apache-2.0
+Copyright 2016 Joe Wilm and the Alacritty Project Contributors
+Scope: the escape-sequence state machine and grid behind
+content::terminal::Emulator, behind the `terminal` feature of gpui-box-kit.
+
+Bundled theme preset palettes
+--------------------------------------------------------------------------------
+Scope: hexadecimal palette values transcribed into the token documents
+crates/gpui-kit-tokens/tokens/{catppuccin-mocha,catppuccin-latte,nord,
+tokyo-night,gruvbox-dark,dracula,solarized-dark,solarized-light}.json. No
+upstream file is vendored and no upstream code is linked; see PROVENANCE.md P11
+for the values that were adjusted to clear this repository's contrast gates.
+
+Catppuccin
+Source: https://github.com/catppuccin/catppuccin
+License: MIT
+Copyright (c) 2021 Catppuccin
+
+Nord
+Source: https://github.com/nordtheme/nord
+License: MIT
+Copyright (c) 2016-present Sven Greb
+
+Tokyo Night
+Source: https://github.com/enkia/tokyo-night-vscode-theme
+License: MIT
+Copyright (c) 2019 enkia
+
+gruvbox
+Source: https://github.com/morhetz/gruvbox
+License: MIT
+Copyright (c) 2018 Pavel Pertsev
+
+Dracula
+Source: https://github.com/dracula/dracula-theme
+License: MIT
+Copyright (c) 2016 Dracula Theme
+
+Solarized
+Source: https://github.com/altercation/solarized
+License: MIT
+Copyright (c) 2011 Ethan Schoonover
+
+Longbridge GPUI Component plot behavior reference
+--------------------------------------------------------------------------------
+Source: https://github.com/longbridge/gpui-component
+Revision: 6761b4ec9ca90cf2c37f8ba01deaa9ffcf0d0da7
+License: Apache-2.0
+Scope: behavioral and architectural reference for the original normalized
+Plot, CandlestickChart, and SankeyChart implementation in
+crates/gpui-kit/src/display/plot.rs. No upstream source, d3-sankey layout code,
+financial fixture, or Cargo dependency is included; see PROVENANCE.md P13.
+License text: LICENSE-APACHE
+
+Longbridge GPUI Component FPS behavior reference
+--------------------------------------------------------------------------------
+Source: https://github.com/longbridge/gpui-component
+Revision: 6761b4ec9ca90cf2c37f8ba01deaa9ffcf0d0da7
+License: Apache-2.0
+Scope: behavioral reference for a bounded per-window live frame reading. GPUI
+Box's `FrameTimingMonitor` and controlled `PerformanceHud` are original. No
+upstream Rust source, resource sampler, overlay policy, styling, or Cargo
+dependency is included; see PROVENANCE.md P14.
+License text: LICENSE-APACHE
+
+Longbridge GPUI Component editor behavior reference
+--------------------------------------------------------------------------------
+Source: https://github.com/longbridge/gpui-component
+Revision: 6761b4ec9ca90cf2c37f8ba01deaa9ffcf0d0da7
+License: Apache-2.0
+Scope: behavioral reference for a source-oriented editing surface. GPUI Box's
+`Editor` and `TextArea` changes are original and include no upstream Rust
+source, parser, grammar, language-server transport, product model, or Cargo
+dependency; see PROVENANCE.md P15.
+License text: LICENSE-APACHE
+
+Longbridge GPUI Component dock behavior reference
+--------------------------------------------------------------------------------
+Source: https://github.com/longbridge/gpui-component
+Revision: 6761b4ec9ca90cf2c37f8ba01deaa9ffcf0d0da7
+License: Apache-2.0
+Scope: behavioral reference for recursive split/tab topology, persistent empty
+groups, and centre-versus-edge dock intents. GPUI Box's `DockTree` is original
+and reuses its existing split, tab, and drag authorities. No upstream Rust
+source, registry, application model, skin, tile renderer, persistence
+transport, or Cargo dependency is included; see PROVENANCE.md P16.
+License text: LICENSE-APACHE
+
+Longbridge GPUI Component native-menu behavior reference
+--------------------------------------------------------------------------------
+Source: https://github.com/longbridge/gpui-component
+Revision: 6761b4ec9ca90cf2c37f8ba01deaa9ffcf0d0da7
+License: Apache-2.0
+Scope: architectural and platform-behavior reference for mapping recursive
+GPUI actions to macOS/Windows native context menus while retaining an
+in-window fallback. GPUI Box places the contract in its framework/platform
+boundary and reuses its existing Kit menu. No upstream component menu model,
+root overlay, icon pipeline, source file, or Cargo dependency is included; see
+PROVENANCE.md P17.
+License text: LICENSE-APACHE

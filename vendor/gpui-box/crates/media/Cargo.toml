@@ -1,0 +1,68 @@
+[package]
+name = "gpui-box-media"
+version = "0.1.2"
+edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+publish = true
+license = "Apache-2.0"
+description = "Native media playback and platform media bindings for GPUI Box"
+
+repository = "https://github.com/fran0220/gpui-box"
+[lints]
+workspace = true
+
+[lib]
+name = "media"
+path = "src/media.rs"
+doctest = false
+
+[[test]]
+name = "native_media"
+path = "tests/native_media.rs"
+harness = false
+required-features = ["native-playback"]
+
+[features]
+default = ["native-playback"]
+# Keep the product-neutral player contract available to deterministic tests
+# and unsupported targets without compiling an operating-system decoder. The
+# normal crate keeps native playback on by default.
+native-playback = [
+    "dep:bindgen",
+    "dep:cc",
+    "dep:core-foundation",
+    "dep:core-video",
+    "dep:ctor",
+    "dep:foreign-types",
+    "dep:metal",
+    "dep:objc",
+    "dep:url",
+    "dep:windows",
+    "dep:windows-core",
+]
+
+[dependencies]
+anyhow.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { workspace = true, optional = true }
+ctor = { workspace = true, optional = true }
+foreign-types = { workspace = true, optional = true }
+metal = { workspace = true, optional = true }
+core-video = { workspace = true, optional = true }
+objc = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+url = { workspace = true, optional = true }
+windows = { workspace = true, optional = true, features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+bindgen = { version = "0.71", optional = true }
+cc = { version = "1.2", optional = true }
