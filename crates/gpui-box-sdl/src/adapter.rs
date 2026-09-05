@@ -91,6 +91,13 @@ impl SdlInputAdapter {
             }
             sdl::SDL_EVENT_TEXT_INPUT => self.adapt_text_input(unsafe { event.text }),
             sdl::SDL_EVENT_TEXT_EDITING => self.adapt_text_editing(unsafe { event.edit }),
+            sdl::SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED => self
+                .adapt_resize(unsafe { event.window })
+                .into_iter()
+                .collect(),
+            sdl::SDL_EVENT_WINDOW_FOCUS_GAINED => vec![SdlHostEvent::FocusChanged(true)],
+            sdl::SDL_EVENT_WINDOW_FOCUS_LOST => self.adapt_focus_loss(),
+            sdl::SDL_EVENT_QUIT => vec![SdlHostEvent::Quit],
             _ => Vec::new(),
         }
     }
@@ -218,6 +225,20 @@ impl SdlInputAdapter {
             start: event.start,
             length: event.length,
         })]
+    }
+
+    fn adapt_resize(&self, event: sdl::SDL_WindowEvent) -> Option<SdlHostEvent> {
+        let width = u32::try_from(event.data1).ok().filter(|value| *value > 0)?;
+        let height = u32::try_from(event.data2).ok().filter(|value| *value > 0)?;
+        Some(SdlHostEvent::WindowResized { width, height })
+    }
+
+    fn adapt_focus_loss(&mut self) -> Vec<SdlHostEvent> {
+        let mut output =
+            self.update_modifiers(gpui::Modifiers::default(), gpui::Capslock::default());
+        self.pressed_button = None;
+        output.push(SdlHostEvent::FocusChanged(false));
+        output
     }
 }
 
