@@ -1,3 +1,22 @@
+use sdl3_sys::everything as sdl;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextEditing {
+    pub text: String,
+    pub start: i32,
+    pub length: i32,
+}
+
+#[derive(Clone, Debug)]
+pub enum SdlHostEvent {
+    Input(gpui::PlatformInput),
+    TextInput(String),
+    TextEditing(TextEditing),
+    WindowResized { width: u32, height: u32 },
+    FocusChanged(bool),
+    Quit,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Viewport {
     pub origin_x: f32,
@@ -17,12 +36,20 @@ impl Default for Viewport {
 
 pub struct SdlInputAdapter {
     viewport: Viewport,
+    modifiers: gpui::Modifiers,
+    pointer: gpui::Point<gpui::Pixels>,
+    pressed_button: Option<gpui::MouseButton>,
 }
 
 impl SdlInputAdapter {
     pub fn new(viewport: Viewport) -> anyhow::Result<Self> {
         validate_viewport(viewport)?;
-        Ok(Self { viewport })
+        Ok(Self {
+            viewport,
+            modifiers: gpui::Modifiers::default(),
+            pointer: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+            pressed_button: None,
+        })
     }
 
     pub fn set_viewport(&mut self, viewport: Viewport) -> anyhow::Result<()> {
@@ -37,6 +64,118 @@ impl SdlInputAdapter {
             gpui::px((y - self.viewport.origin_y) / self.viewport.scale),
         )
     }
+
+    /// Translates one raw SDL event into zero or more host actions.
+    ///
+    /// # Safety
+    ///
+    /// `event` must have been populated by SDL, and any pointers carried by it
+    /// must remain valid for this call.
+    pub unsafe fn adapt(&mut self, event: &sdl::SDL_Event) -> Vec<SdlHostEvent> {
+        match event.event_type() {
+            sdl::SDL_EVENT_MOUSE_MOTION => vec![self.adapt_motion(unsafe { event.motion })],
+            sdl::SDL_EVENT_MOUSE_BUTTON_DOWN | sdl::SDL_EVENT_MOUSE_BUTTON_UP => self
+                .adapt_button(unsafe { event.button })
+                .into_iter()
+                .collect(),
+            sdl::SDL_EVENT_MOUSE_WHEEL => vec![self.adapt_wheel(unsafe { event.wheel })],
+            sdl::SDL_EVENT_WINDOW_MOUSE_LEAVE => vec![self.adapt_mouse_exit()],
+            _ => Vec::new(),
+        }
+    }
+
+    fn adapt_motion(&mut self, event: sdl::SDL_MouseMotionEvent) -> SdlHostEvent {
+        self.pointer = self.map_position(event.x, event.y);
+        self.pressed_button = pressed_button(event.state);
+        SdlHostEvent::Input(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+            position: self.pointer,
+            pressed_button: self.pressed_button,
+            modifiers: self.modifiers,
+        }))
+    }
+
+    fn adapt_button(&mut self, event: sdl::SDL_MouseButtonEvent) -> Option<SdlHostEvent> {
+        let button = mouse_button(event.button)?;
+        self.pointer = self.map_position(event.x, event.y);
+        if event.down {
+            self.pressed_button = Some(button);
+            return Some(SdlHostEvent::Input(gpui::PlatformInput::MouseDown(
+                gpui::MouseDownEvent {
+                    button,
+                    position: self.pointer,
+                    modifiers: self.modifiers,
+                    click_count: usize::from(event.clicks),
+                    first_mouse: false,
+                },
+            )));
+        }
+        if self.pressed_button == Some(button) {
+            self.pressed_button = None;
+        }
+        Some(SdlHostEvent::Input(gpui::PlatformInput::MouseUp(
+            gpui::MouseUpEvent {
+                button,
+                position: self.pointer,
+                modifiers: self.modifiers,
+                click_count: usize::from(event.clicks),
+            },
+        )))
+    }
+
+    fn adapt_wheel(&mut self, event: sdl::SDL_MouseWheelEvent) -> SdlHostEvent {
+        self.pointer = self.map_position(event.mouse_x, event.mouse_y);
+        let direction = if event.direction == sdl::SDL_MOUSEWHEEL_FLIPPED {
+            -1.0
+        } else {
+            1.0
+        };
+        SdlHostEvent::Input(gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+            position: self.pointer,
+            delta: gpui::ScrollDelta::Lines(gpui::point(event.x * direction, event.y * direction)),
+            modifiers: self.modifiers,
+            touch_phase: gpui::TouchPhase::Moved,
+        }))
+    }
+
+    fn adapt_mouse_exit(&self) -> SdlHostEvent {
+        SdlHostEvent::Input(gpui::PlatformInput::MouseExited(gpui::MouseExitEvent {
+            position: self.pointer,
+            pressed_button: self.pressed_button,
+            modifiers: self.modifiers,
+        }))
+    }
+}
+
+fn mouse_button(button: u8) -> Option<gpui::MouseButton> {
+    match i32::from(button) {
+        sdl::SDL_BUTTON_LEFT => Some(gpui::MouseButton::Left),
+        sdl::SDL_BUTTON_RIGHT => Some(gpui::MouseButton::Right),
+        sdl::SDL_BUTTON_MIDDLE => Some(gpui::MouseButton::Middle),
+        sdl::SDL_BUTTON_X1 => Some(gpui::MouseButton::Navigate(gpui::NavigationDirection::Back)),
+        sdl::SDL_BUTTON_X2 => Some(gpui::MouseButton::Navigate(
+            gpui::NavigationDirection::Forward,
+        )),
+        _ => None,
+    }
+}
+
+fn pressed_button(state: sdl::SDL_MouseButtonFlags) -> Option<gpui::MouseButton> {
+    let priorities = [
+        (sdl::SDL_BUTTON_LMASK, gpui::MouseButton::Left),
+        (sdl::SDL_BUTTON_RMASK, gpui::MouseButton::Right),
+        (sdl::SDL_BUTTON_MMASK, gpui::MouseButton::Middle),
+        (
+            sdl::SDL_BUTTON_X1MASK,
+            gpui::MouseButton::Navigate(gpui::NavigationDirection::Back),
+        ),
+        (
+            sdl::SDL_BUTTON_X2MASK,
+            gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward),
+        ),
+    ];
+    priorities
+        .into_iter()
+        .find_map(|(mask, button)| (state.0 & mask.0 != 0).then_some(button))
 }
 
 fn validate_viewport(viewport: Viewport) -> anyhow::Result<()> {

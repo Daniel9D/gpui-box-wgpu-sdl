@@ -1,3 +1,3 @@
 mod adapter;
 
-pub use adapter::{SdlInputAdapter, Viewport};
+pub use adapter::{SdlHostEvent, SdlInputAdapter, TextEditing, Viewport};
