@@ -140,10 +140,13 @@ IME composition, accessibility, and other platform services need an app adapter.
 - Physical dimensions must be non-zero, one layer, and within device limits.
   Scale must be positive and finite; logical size is physical size divided by scale.
 
-## Future SDL bridge
+## SDL bridge
 
-There is no SDL or winit dependency. Convert native events to
-`gpui::PlatformInput` in the consuming application. For an embedded viewport:
+The workspace includes the renderer-independent
+[`gpui-box-sdl`](crates/gpui-box-sdl/README.md) adapter. It converts raw SDL3
+events into `gpui::PlatformInput` plus explicit text, IME, resize, focus, and
+quit actions. SDL remains responsible for its window, event loop, swapchain,
+and presentation. For an embedded viewport:
 
 ```text
 gpui_position = (native_position - viewport_origin) / viewport_scale
@@ -157,9 +160,13 @@ gpui_position = (native_position - viewport_origin) / viewport_scale
 | key down/up | `KeyDownEvent` / `KeyUpEvent` | normalized key, character, repeat, modifiers |
 | modifiers | `ModifiersChangedEvent` | Ctrl, Alt, Shift, platform, function, Caps Lock |
 | committed text | `WgpuHost::dispatch_text` | UTF-8 text from `SDL_EVENT_TEXT_INPUT` |
-| composition | future platform adapter | marked range and `SDL_EVENT_TEXT_EDITING` data |
+| composition | `SdlHostEvent::TextEditing` | marked range and `SDL_EVENT_TEXT_EDITING` data |
 | resize/HiDPI | `render_to_view` | physical extent and positive scale factor |
-| focus/cursor/clipboard | future bidirectional adapter | GPUI platform requests and SDL responses |
+| focus | `SdlHostEvent::FocusChanged` | loss also clears retained input state |
+| cursor/clipboard | future bidirectional adapter | GPUI platform requests and SDL responses |
+
+See the adapter README for `path`/Git dependencies, the raw-event safety
+contract, and a complete routing example.
 
 ## Checks
 

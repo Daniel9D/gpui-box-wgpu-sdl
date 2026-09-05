@@ -26,9 +26,10 @@ listener test. `rust-engine` remains unchanged during this work.
 The repository becomes a Cargo workspace containing its current root package
 and `crates/gpui-box-sdl`. The adapter crate depends on `gpui-box` and exactly
 `sdl3-sys 0.6.8`; it does not depend on `gpui-box-wgpu`. A passthrough
-`build-from-source` feature enables `sdl3-sys/build-from-source` for standalone
-testing and matches the engine's final SDL stack without forcing that build
-policy on every library consumer.
+`build-from-source` enables `sdl3-sys/build-from-source` and is the default so
+standalone tests match the engine's final SDL stack without requiring a system
+`SDL3.lib`. A consumer that supplies a compatible system SDL can opt out with
+`default-features = false`.
 
 The public boundary is deliberately small:
 
