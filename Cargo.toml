@@ -56,3 +56,8 @@ gpui = { package = "gpui-box", git = "https://github.com/fran0220/gpui-box.git",
 image = { version = "0.25.1", default-features = false, features = ["png"] }
 env_logger = "0.11"
 naga = { version = "=30.0.0", features = ["wgsl-in"] }
+
+[workspace]
+members = ["crates/gpui-box-sdl"]
+default-members = [".", "crates/gpui-box-sdl"]
+resolver = "3"
