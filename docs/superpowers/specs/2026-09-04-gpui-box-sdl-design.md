@@ -120,7 +120,7 @@ state.
 | `SDL_EVENT_TEXT_INPUT` | owned `TextInput`; empty text is ignored |
 | `SDL_EVENT_TEXT_EDITING` | owned `TextEditing`; this is not dispatched as committed text |
 | `SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED` | validated positive physical `WindowResized` |
-| `SDL_EVENT_WINDOW_FOCUS_GAINED/LOST` | `FocusChanged`; focus loss also clears retained button/modifier state |
+| `SDL_EVENT_WINDOW_FOCUS_GAINED/LOST` | `FocusChanged`; focus loss first emits a default `ModifiersChanged` when needed, then clears retained button/modifier state |
 | `SDL_EVENT_QUIT` | `Quit` |
 
 Mouse buttons map left, right, middle, back and forward to GPUI equivalents.
@@ -134,8 +134,10 @@ names. `key_char` remains `None` in key events so `SDL_EVENT_TEXT_INPUT` is the
 single source of committed text and characters are never inserted twice.
 SDL's repeat flag maps to `KeyDownEvent::is_held`.
 
-SDL Ctrl maps to GPUI `control`; SDL GUI maps to `platform`; Alt, Shift,
-Function and Caps Lock map independently. Ctrl is not aliased to `platform`.
+SDL Ctrl maps to GPUI `control`; SDL GUI maps to `platform`; Alt, Shift and
+Caps Lock map independently. SDL3 exposes no ordinary Fn modifier bit, so GPUI
+`function` remains false; `SDL_KMOD_MODE`/`LEVEL5` are not incorrectly treated
+as Fn. Ctrl is not aliased to `platform`.
 
 ## Testing strategy
 
