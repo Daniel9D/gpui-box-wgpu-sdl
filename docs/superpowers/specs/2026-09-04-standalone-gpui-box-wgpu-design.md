@@ -256,9 +256,10 @@ lints remain only where their rationale still applies.
 Development follows red-green-refactor cycles for behavior changes after the
 source baseline is copied unchanged.
 
-1. A default-feature API test proves that `ExternalGpu`, `WgpuHost`,
-   `WgpuHeadlessRenderer::from_external`, and `render_scene_to_view` are
-   available without `test-support`.
+1. A default-feature API test proves that
+   `WgpuHeadlessRenderer::from_external` and `render_scene_to_view` are
+   available without optional features. `ExternalGpu` and `WgpuHost` are
+   exercised separately with the `host` feature enabled.
 2. Pure tests cover physical-to-logical size validation and reject invalid
    dimensions and scale factors without requiring a GPU.
 3. Host tests dispatch representative pointer and keyboard inputs into a real

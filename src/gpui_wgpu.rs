@@ -1,13 +1,19 @@
+#![doc = include_str!("../README.md")]
+
 mod cosmic_text_system;
 mod wgpu_atlas;
 mod wgpu_context;
+#[cfg(all(not(target_family = "wasm"), feature = "host"))]
+mod wgpu_host;
 mod wgpu_renderer;
 
 pub use cosmic_text_system::*;
 pub use wgpu;
 pub use wgpu_atlas::*;
 pub use wgpu_context::*;
-#[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+#[cfg(all(not(target_family = "wasm"), feature = "host"))]
+pub use wgpu_host::*;
+#[cfg(not(target_family = "wasm"))]
 pub use wgpu_renderer::WgpuHeadlessRenderer;
 pub use wgpu_renderer::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
 

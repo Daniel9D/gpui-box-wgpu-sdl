@@ -124,7 +124,7 @@ impl WgpuContext {
     }
 
     /// Creates a GPU context without requiring a display or window surface.
-    #[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "host")))]
     pub fn new_headless() -> anyhow::Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -700,7 +700,7 @@ impl WgpuContext {
     }
 }
 
-#[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+#[cfg(all(not(target_family = "wasm"), any(test, feature = "host")))]
 fn headless_adapter_options() -> wgpu::RequestAdapterOptions<'static, 'static> {
     wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,

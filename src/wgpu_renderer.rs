@@ -623,7 +623,7 @@ impl WgpuRenderer {
         )
     }
 
-    #[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "host")))]
     fn new_headless(context: &WgpuContext, atlas: Arc<WgpuAtlas>) -> anyhow::Result<Self> {
         let required_usages = wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
@@ -649,7 +649,7 @@ impl WgpuRenderer {
         Self::new_headless_with_format(context, atlas, surface_format)
     }
 
-    #[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+    #[cfg(not(target_family = "wasm"))]
     fn new_headless_with_format(
         context: &WgpuContext,
         atlas: Arc<WgpuAtlas>,
@@ -1773,7 +1773,7 @@ impl WgpuRenderer {
         self.max_texture_size
     }
 
-    #[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "host")))]
     fn render_scene_to_image(
         &mut self,
         scene: &Scene,
@@ -1880,7 +1880,7 @@ impl WgpuRenderer {
         readback_buffer.unmap();
 
         if self.surface_config.format == wgpu::TextureFormat::Bgra8Unorm {
-            for pixel in pixels.chunks_exact_mut(4) {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
         }
@@ -1889,7 +1889,7 @@ impl WgpuRenderer {
             .ok_or_else(|| anyhow::anyhow!("Failed to create RgbaImage from headless pixel data"))
     }
 
-    #[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "host")))]
     fn render_scene_offscreen(
         &mut self,
         scene: &Scene,
@@ -1898,7 +1898,7 @@ impl WgpuRenderer {
         self.render_scene_to_texture(scene, size).map(drop)
     }
 
-    #[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "host")))]
     fn render_scene_to_texture(
         &mut self,
         scene: &Scene,
@@ -1928,7 +1928,7 @@ impl WgpuRenderer {
         Ok(texture)
     }
 
-    #[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+    #[cfg(not(target_family = "wasm"))]
     fn render_scene_to_view(
         &mut self,
         scene: &Scene,
@@ -1940,7 +1940,7 @@ impl WgpuRenderer {
         self.draw_to_view(scene, target_view, wgpu::Color::TRANSPARENT)
     }
 
-    #[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+    #[cfg(not(target_family = "wasm"))]
     fn prepare_headless_frame(&mut self, size: Size<DevicePixels>) -> anyhow::Result<()> {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             anyhow::bail!("Invalid size for headless rendering: {:?}", size);
@@ -3484,13 +3484,24 @@ fn batch_first_order(scene: &Scene, batch: &PrimitiveBatch) -> DrawOrder {
     }
 }
 
-#[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+#[cfg(not(target_family = "wasm"))]
 pub struct WgpuHeadlessRenderer {
     renderer: WgpuRenderer,
 }
 
-#[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+#[cfg(not(target_family = "wasm"))]
 impl WgpuHeadlessRenderer {
+    #[cfg(feature = "host")]
+    pub(crate) fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
+        self.renderer.sprite_atlas().clone()
+    }
+
+    #[cfg(feature = "host")]
+    pub(crate) fn backdrop_luminance(&mut self, slot: u32) -> Option<f32> {
+        self.renderer.backdrop_luminance(slot)
+    }
+
+    #[cfg(any(test, feature = "host"))]
     pub fn new() -> anyhow::Result<Self> {
         // Inside this crate's own test binary, building a device without the
         // serialising guard is what took Windows down, so it is refused here
@@ -3529,7 +3540,7 @@ impl WgpuHeadlessRenderer {
     }
 }
 
-#[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
+#[cfg(all(not(target_family = "wasm"), any(test, feature = "host")))]
 impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
     fn render_scene_to_image(
         &mut self,

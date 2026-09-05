@@ -11,6 +11,9 @@ description = "Embeddable wgpu renderer and generic host for GPUI Box"
 name = "gpui_wgpu"
 path = "src/gpui_wgpu.rs"
 
+[lints.clippy]
+cognitive_complexity = "deny"
+
 [features]
 default = []
 font-kit = ["dep:font-kit"]
@@ -49,5 +52,7 @@ js-sys = "0.3"
 wgpu = { version = "30.0.1", features = ["webgl"] }
 
 [dev-dependencies]
+gpui = { package = "gpui-box", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2", features = ["test-support"] }
+image = { version = "0.25.1", default-features = false, features = ["png"] }
 env_logger = "0.11"
 naga = { version = "=30.0.0", features = ["wgsl-in"] }
