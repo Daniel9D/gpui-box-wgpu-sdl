@@ -15,7 +15,7 @@ path = "src/lib.rs"
 cognitive_complexity = "deny"
 
 [features]
-default = []
+default = ["build-from-source"]
 build-from-source = ["sdl3-sys/build-from-source"]
 
 [dependencies]

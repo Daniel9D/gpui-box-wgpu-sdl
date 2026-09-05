@@ -1,4 +1,8 @@
+use std::ffi::CStr;
+
 use sdl3_sys::everything as sdl;
+
+use crate::keyboard;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TextEditing {
@@ -37,6 +41,7 @@ impl Default for Viewport {
 pub struct SdlInputAdapter {
     viewport: Viewport,
     modifiers: gpui::Modifiers,
+    capslock: gpui::Capslock,
     pointer: gpui::Point<gpui::Pixels>,
     pressed_button: Option<gpui::MouseButton>,
 }
@@ -47,6 +52,7 @@ impl SdlInputAdapter {
         Ok(Self {
             viewport,
             modifiers: gpui::Modifiers::default(),
+            capslock: gpui::Capslock::default(),
             pointer: gpui::point(gpui::px(0.0), gpui::px(0.0)),
             pressed_button: None,
         })
@@ -80,6 +86,11 @@ impl SdlInputAdapter {
                 .collect(),
             sdl::SDL_EVENT_MOUSE_WHEEL => vec![self.adapt_wheel(unsafe { event.wheel })],
             sdl::SDL_EVENT_WINDOW_MOUSE_LEAVE => vec![self.adapt_mouse_exit()],
+            sdl::SDL_EVENT_KEY_DOWN | sdl::SDL_EVENT_KEY_UP => {
+                self.adapt_keyboard(unsafe { event.key })
+            }
+            sdl::SDL_EVENT_TEXT_INPUT => self.adapt_text_input(unsafe { event.text }),
+            sdl::SDL_EVENT_TEXT_EDITING => self.adapt_text_editing(unsafe { event.edit }),
             _ => Vec::new(),
         }
     }
@@ -144,6 +155,81 @@ impl SdlInputAdapter {
             modifiers: self.modifiers,
         }))
     }
+
+    fn adapt_keyboard(&mut self, event: sdl::SDL_KeyboardEvent) -> Vec<SdlHostEvent> {
+        let (modifiers, capslock) = keyboard::modifiers(event.r#mod);
+        let mut output = self.update_modifiers(modifiers, capslock);
+        let Some(key) = keyboard::key_name(event.key) else {
+            return output;
+        };
+        let keystroke = gpui::Keystroke {
+            modifiers,
+            key,
+            key_char: None,
+        };
+        let input = if event.down {
+            gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
+                keystroke,
+                is_held: event.repeat,
+                prefer_character_input: false,
+            })
+        } else {
+            gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke })
+        };
+        output.push(SdlHostEvent::Input(input));
+        output
+    }
+
+    fn update_modifiers(
+        &mut self,
+        modifiers: gpui::Modifiers,
+        capslock: gpui::Capslock,
+    ) -> Vec<SdlHostEvent> {
+        if self.modifiers == modifiers && self.capslock == capslock {
+            return Vec::new();
+        }
+        self.modifiers = modifiers;
+        self.capslock = capslock;
+        vec![SdlHostEvent::Input(gpui::PlatformInput::ModifiersChanged(
+            gpui::ModifiersChangedEvent {
+                modifiers,
+                capslock,
+            },
+        ))]
+    }
+
+    fn adapt_text_input(&self, event: sdl::SDL_TextInputEvent) -> Vec<SdlHostEvent> {
+        let Some(text) = copy_text(event.text) else {
+            return Vec::new();
+        };
+        if text.is_empty() {
+            Vec::new()
+        } else {
+            vec![SdlHostEvent::TextInput(text)]
+        }
+    }
+
+    fn adapt_text_editing(&self, event: sdl::SDL_TextEditingEvent) -> Vec<SdlHostEvent> {
+        let Some(text) = copy_text(event.text) else {
+            return Vec::new();
+        };
+        vec![SdlHostEvent::TextEditing(TextEditing {
+            text,
+            start: event.start,
+            length: event.length,
+        })]
+    }
+}
+
+fn copy_text(text: *const std::ffi::c_char) -> Option<String> {
+    if text.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn mouse_button(button: u8) -> Option<gpui::MouseButton> {
