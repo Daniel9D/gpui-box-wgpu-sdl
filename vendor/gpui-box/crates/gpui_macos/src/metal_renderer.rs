@@ -913,6 +913,7 @@ impl MetalRenderer {
                     viewport_size,
                     command_encoder,
                 ),
+                PrimitiveBatch::ExternalImages { .. } => {}
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
         }
@@ -1857,6 +1858,9 @@ fn batch_first_order(scene: &Scene, batch: &PrimitiveBatch) -> DrawOrder {
             scene.polychrome_sprites[range.start].order
         }
         PrimitiveBatch::Surfaces(range) => scene.surfaces[range.start].order,
+        PrimitiveBatch::ExternalImages { range, .. } => {
+            scene.external_images[range.start].sprite.order
+        }
     }
 }
 

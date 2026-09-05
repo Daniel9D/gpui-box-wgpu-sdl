@@ -22,7 +22,7 @@ license and revision provenance. The existing local renderer remains the only
 
 ## Public API
 
-`gpui-box` exposes a cloneable, type-erased `ExternalImage` handle containing
+`gpui-box` exposes a cloneable, type-erased `ExternalImageHandle` containing
 a stable identifier, physical pixel size, and an `Arc<dyn Any + Send + Sync>`
 backend payload. `ImageSource`
 accepts that handle and `img` treats it like any other image for intrinsic

@@ -753,6 +753,7 @@ impl DirectXRenderer {
                     )
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
+                PrimitiveBatch::ExternalImages { .. } => Ok(()),
             }
             .with_context(|| {
                 format!(
@@ -2699,6 +2700,9 @@ fn backdrop_batch_first_order(scene: &Scene, batch: &PrimitiveBatch) -> DrawOrde
             scene.polychrome_sprites[range.start].order
         }
         PrimitiveBatch::Surfaces(range) => scene.surfaces[range.start].order,
+        PrimitiveBatch::ExternalImages { range, .. } => {
+            scene.external_images[range.start].sprite.order
+        }
     }
 }
 

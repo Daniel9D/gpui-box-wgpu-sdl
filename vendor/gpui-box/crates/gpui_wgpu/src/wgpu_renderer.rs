@@ -2323,6 +2323,7 @@ impl WgpuRenderer {
                     // Surfaces are macOS-only for video playback and are not
                     // implemented by the WGPU renderer.
                     PrimitiveBatch::Surfaces(_surfaces) => {}
+                    PrimitiveBatch::ExternalImages { .. } => {}
                 }
             }
             for glass in pending_glass {
@@ -3441,6 +3442,9 @@ fn batch_first_order(scene: &Scene, batch: &PrimitiveBatch) -> DrawOrder {
             scene.polychrome_sprites[range.start].order
         }
         PrimitiveBatch::Surfaces(range) => scene.surfaces[range.start].order,
+        PrimitiveBatch::ExternalImages { range, .. } => {
+            scene.external_images[range.start].sprite.order
+        }
     }
 }
 
