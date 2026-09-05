@@ -19,8 +19,10 @@ default = []
 font-kit = ["dep:font-kit"]
 host = ["gpui/test-support", "dep:image"]
 test-support = ["host"]
+kit = ["host", "dep:gpui-kit"]
 
 [dependencies]
+gpui-kit = { path = "vendor/gpui-kit/crates/kit", optional = true }
 gpui = { package = "gpui-box", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2" }
 collections = { package = "gpui-box-collections", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2" }
 gpui_util = { package = "gpui-box-util", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2" }
@@ -58,6 +60,7 @@ env_logger = "0.11"
 naga = { version = "=30.0.0", features = ["wgsl-in"] }
 
 [workspace]
+exclude = ["vendor/gpui-kit"]
 members = ["crates/gpui-box-sdl"]
 default-members = [".", "crates/gpui-box-sdl"]
 resolver = "3"

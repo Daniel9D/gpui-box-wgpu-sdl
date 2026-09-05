@@ -184,3 +184,76 @@ Clippy's supported complexity metric, not a numeric cyclomatic-complexity
 measurement. New GPU tests explicitly skip if no adapter exists; failures after
 acquisition fail the test. Inherited deterministic pixel tests require a software
 adapter (Windows WARP or Linux llvmpipe).
+
+## GPUI Kit on the embedded host
+
+Enable `features = ["kit"]` on `gpui-box-wgpu`, and depend on the adapted kit
+at `vendor/gpui-kit/crates/kit` (not the crates.io version):
+
+```toml
+[dependencies]
+gpui_wgpu = { package = "gpui-box-wgpu", path = "../gpui-box-wgpu", features = ["kit"] }
+gpui-kit = { path = "../gpui-box-wgpu/vendor/gpui-kit/crates/kit" }
+```
+
+The `kit` feature enables `host`. Default renderer builds do not compile the
+kit. The snapshot and its compatibility differences are documented in
+[vendor/gpui-kit/EMBEDDED.md](vendor/gpui-kit/EMBEDDED.md).
+
+In the `WgpuHost::new` root builder, initialize the kit once and wrap your view:
+
+```ignore
+// Pass Arc::new(gpui_kit::assets::Assets) as the host asset source,
+// and a text system with the fonts your theme uses.
+move |window, cx| {
+    gpui_kit::init(cx);
+    let content = cx.new(|cx| MyView::new(window, cx));
+    cx.new(|cx| gpui_kit::component::Root::new(content, window, cx))
+}
+```
+
+Use `gpui_kit::*` for GPUI types and `gpui_kit::component::*` for controls.
+Do not call the upstream `application()` bootstrap; this embedded facade does
+not export it. SDL3 and your engine own the window and presentation.
+
+Each engine frame:
+
+1. Route SDL events through the SDL adapter and `host.dispatch`/`dispatch_text`.
+2. Call `host.tick(elapsed)` even when there are no input events. Elapsed time
+   is the delta since the last tick, not time since startup. This pumps tasks
+   and advances the deterministic host clock for timers and animations.
+3. Render into an engine-owned UI texture with `host.render_to_view`.
+4. Composite that texture over the engine scene on the GPU, then present.
+
+The UI target must use the same device and constructor format, with
+`RENDER_ATTACHMENT | TEXTURE_BINDING` usage. The renderer clears its target;
+use a separate target to preserve your scene. Configure transparent UI/root
+backgrounds where the scene should remain visible. Match the composition blend
+state to the rendered texture's alpha representation; no CPU readback is needed.
+
+`host.update(|window, cx| ...)` allows changes to entities, focus, globals and
+clipboard. Clipboard in this headless host is in-process: synchronize it with
+SDL explicitly for OS copy/paste. IME composition, native cursors, accessibility
+transport, native menus, additional OS windows and real-I/O scheduling are not
+provided by this integration. The headless context installs a fake HTTP client
+that returns 404; components needing network resources require an
+engine-provided service. `tick` retains the test dispatcher, not a native
+production event loop.
+
+The focused compatibility check is:
+
+```text
+cargo test --features kit --test wgpu_host_gpu -- --test-threads=1
+```
+
+It exercises external-device rendering, a kit button, Unicode input,
+in-process clipboard paste, and engine-driven timers. A GPU adapter is required
+for execution; without one the GPU tests report a skip.
+
+The vendored crates form an independent workspace. Compile every library and
+test target, then exercise the embedded facade with:
+
+```text
+cargo check --manifest-path vendor/gpui-kit/Cargo.toml --workspace --all-targets
+cargo test --manifest-path vendor/gpui-kit/Cargo.toml -p gpui-kit --all-features
+```

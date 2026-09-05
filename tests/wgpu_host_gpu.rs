@@ -183,6 +183,31 @@ fn dispatches_pointer_keyboard_and_committed_text() {
     assert!(fixture.host.dispatch_text("").is_err());
 }
 
+#[test]
+fn engine_tick_advances_tasks_without_input_events() {
+    let _gpu = gpu_test_guard();
+    let Some(mut fixture) = fixture() else { return };
+    let completed = Rc::new(Cell::new(false));
+    let task_completed = completed.clone();
+    fixture
+        .host
+        .update(move |_, cx| {
+            let timer = cx
+                .background_executor()
+                .timer(std::time::Duration::from_millis(50));
+            cx.spawn(async move |_| {
+                timer.await;
+                task_completed.set(true);
+            })
+            .detach();
+        })
+        .unwrap();
+    fixture.host.tick(std::time::Duration::from_millis(49));
+    assert!(!completed.get());
+    fixture.host.tick(std::time::Duration::from_millis(1));
+    assert!(completed.get());
+}
+
 fn fixture() -> Option<Fixture> {
     let _ = env_logger::builder().is_test(true).try_init();
     let (instance, adapter, device, queue) = gpu()?;
@@ -341,4 +366,161 @@ fn read_texture(
     drop(mapped);
     buffer.unmap();
     result
+}
+
+#[cfg(feature = "kit")]
+#[test]
+fn kit_input_and_button_use_the_engine_device() {
+    use gpui::Focusable;
+    use gpui_kit::component::{
+        Root,
+        button::Button,
+        input::{Input, InputState},
+    };
+    struct KitView {
+        input: gpui::Entity<InputState>,
+        clicks: Rc<Cell<u32>>,
+    }
+    impl Render for KitView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    Button::new("button")
+                        .label("Apply")
+                        .tooltip("Apply changes")
+                        .w(px(100.))
+                        .h(px(32.))
+                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                )
+                .child(Input::new(&self.input))
+        }
+    }
+    let _gpu = gpu_test_guard();
+    let Some((instance, adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let device = Arc::new(device);
+    let queue = Arc::new(queue);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("engine_owned_kit_target"),
+        size: EXTENT,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let target = texture.create_view(&Default::default());
+    let clicks = Rc::new(Cell::new(0));
+    let root_clicks = clicks.clone();
+    let input_slot = Rc::new(RefCell::new(None));
+    let root_input = input_slot.clone();
+    let mut host = WgpuHost::new(
+        ExternalGpu {
+            instance,
+            adapter,
+            device: device.clone(),
+            queue: queue.clone(),
+        },
+        wgpu::TextureFormat::Rgba8Unorm,
+        gpui::size(px(256.), px(128.)),
+        Arc::new(CosmicTextSystem::new("Segoe UI")),
+        Arc::new(gpui_kit::assets::Assets),
+        move |window, cx| {
+            gpui_kit::init(cx);
+            let input = cx.new(|cx| InputState::new(window, cx));
+            *root_input.borrow_mut() = Some(input.clone());
+            let content = cx.new(|_| KitView {
+                input,
+                clicks: root_clicks,
+            });
+            cx.new(|cx| Root::new(content, window, cx))
+        },
+    )
+    .unwrap();
+    host.render_to_view(&target, EXTENT, 1.).unwrap();
+    host.dispatch(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+        position: gpui::point(px(20.), px(16.)),
+        pressed_button: None,
+        modifiers: Default::default(),
+    }))
+    .unwrap();
+    host.render_to_view(&target, EXTENT, 1.).unwrap();
+    let before_tooltip = read_texture(&device, &queue, &texture, EXTENT);
+    host.tick(std::time::Duration::from_secs(1));
+    host.render_to_view(&target, EXTENT, 1.).unwrap();
+    host.tick(std::time::Duration::from_millis(300));
+    host.render_to_view(&target, EXTENT, 1.).unwrap();
+    let after_tooltip = read_texture(&device, &queue, &texture, EXTENT);
+    // The tooltip paints outside the button, after engine-driven elapsed time.
+    let below_button = (EXTENT.width * 36 * 4) as usize;
+    assert_ne!(
+        &before_tooltip[below_button..],
+        &after_tooltip[below_button..]
+    );
+    for down in [true, false] {
+        let position = gpui::point(px(20.), px(16.));
+        let event = if down {
+            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                modifiers: Default::default(),
+                click_count: 1,
+                first_mouse: false,
+            })
+        } else {
+            gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                button: gpui::MouseButton::Left,
+                position,
+                modifiers: Default::default(),
+                click_count: 1,
+            })
+        };
+        host.dispatch(event).unwrap();
+    }
+    assert_eq!(clicks.get(), 1);
+    let input = input_slot.borrow().clone().unwrap();
+    host.update(|window, cx| input.read(cx).focus_handle(cx).focus(window, cx))
+        .unwrap();
+    host.render_to_view(&target, EXTENT, 1.).unwrap();
+    host.dispatch_text("olá engine").unwrap();
+    host.update(|_, cx| assert_eq!(input.read(cx).value().as_str(), "olá engine"))
+        .unwrap();
+    host.update(|window, cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(" + paste".into()));
+        window.dispatch_action(Box::new(gpui_kit::component::input::Paste), cx);
+    })
+    .unwrap();
+    host.tick(std::time::Duration::from_millis(16));
+    host.update(|_, cx| assert_eq!(input.read(cx).value().as_str(), "olá engine + paste"))
+        .unwrap();
+    host.render_to_view(&target, EXTENT, 1.).unwrap();
+    drop(input);
+    drop(input_slot);
+}
+
+#[cfg(feature = "kit")]
+#[test]
+fn backported_spring_matches_critical_damping_solution() {
+    use gpui_kit::base::motion::{SpringConfig, SpringState};
+    let config = SpringConfig::new(100., 20., 1.);
+    let state = config.step(
+        SpringState {
+            position: 0.,
+            velocity: 0.,
+        },
+        1.,
+        1.,
+    );
+    // x(t) = 1 - (1 + 10t) exp(-10t), v(t) = 100t exp(-10t).
+    assert!((state.position - 0.9995006).abs() < 0.000001);
+    assert!((state.velocity - 0.004539993).abs() < 0.000001);
 }

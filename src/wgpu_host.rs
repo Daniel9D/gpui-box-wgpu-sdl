@@ -184,6 +184,24 @@ impl WgpuHost {
         })
     }
 
+    /// Updates the hosted window and app, including component state and clipboard.
+    pub fn update<R>(
+        &mut self,
+        update: impl FnOnce(&mut gpui::Window, &mut gpui::App) -> R,
+    ) -> anyhow::Result<R> {
+        self.context
+            .update_window(self.window, |_, window, cx| update(window, cx))
+    }
+
+    /// Pumps queued work and advances the headless clock by engine elapsed time.
+    /// Call once per engine frame, including frames without input events.
+    /// This retains GPUI's deterministic executor; it is not an OS event loop.
+    pub fn tick(&mut self, elapsed: std::time::Duration) {
+        self.context.run_until_parked();
+        self.context.advance_clock(elapsed);
+        self.context.run_until_parked();
+    }
+
     pub fn dispatch(
         &mut self,
         input: gpui::PlatformInput,
