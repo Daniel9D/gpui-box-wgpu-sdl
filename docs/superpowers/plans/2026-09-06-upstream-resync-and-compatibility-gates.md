@@ -451,28 +451,35 @@ git commit -m "build: refresh standalone WGPU renderer"
 Implement the script around pure helpers `sha256(path)`, `relative_files(root)`, and `unexpected_drift(upstream_root, vendor_root, allowed)`. Add `scripts/test_check_vendor_drift.py` with:
 
 ```python
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from scripts.check_vendor_drift import unexpected_drift
 
 
-def test_only_allowlisted_differences_are_accepted():
-    with TemporaryDirectory() as directory:
-        root = Path(directory)
-        upstream = root / "upstream"
-        vendor = root / "vendor"
-        upstream.mkdir()
-        vendor.mkdir()
-        (upstream / "same.rs").write_text("same", encoding="utf-8")
-        (vendor / "same.rs").write_text("same", encoding="utf-8")
-        (upstream / "patched.rs").write_text("old", encoding="utf-8")
-        (vendor / "patched.rs").write_text("new", encoding="utf-8")
+class VendorDriftTests(unittest.TestCase):
+    def test_only_allowlisted_differences_are_accepted(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream = root / "upstream"
+            vendor = root / "vendor"
+            upstream.mkdir()
+            vendor.mkdir()
+            (upstream / "same.rs").write_text("same", encoding="utf-8")
+            (vendor / "same.rs").write_text("same", encoding="utf-8")
+            (upstream / "patched.rs").write_text("old", encoding="utf-8")
+            (vendor / "patched.rs").write_text("new", encoding="utf-8")
 
-        assert unexpected_drift(upstream, vendor, {"patched.rs"}) == []
+            self.assertEqual(unexpected_drift(upstream, vendor, {"patched.rs"}), [])
 
-        (vendor / "same.rs").write_text("drift", encoding="utf-8")
-        assert unexpected_drift(upstream, vendor, {"patched.rs"}) == ["same.rs"]
+            (vendor / "same.rs").write_text("drift", encoding="utf-8")
+            self.assertEqual(
+                unexpected_drift(upstream, vendor, {"patched.rs"}), ["same.rs"]
+            )
 ```
+
+Add a second `unittest` fixture proving that a tar symlink entry is read as
+the UTF-8 bytes of its target, matching Git's Windows materialization.
 
 - [ ] **Step 2: Run the fixture and verify RED**
 
@@ -496,6 +503,10 @@ The script must:
    `core.symlinks=false` materializes that target as an ordinary file on Windows;
 5. ignore only the exact allowlist paths;
 6. print sorted missing, extra, or changed paths and exit one when drift exists.
+
+When the archive URL is unavailable, the local developer command may fall back
+to `git archive <revision>` only when that exact immutable object is already in
+the repository. Fresh CI clones still exercise the GitHub archive path.
 
 `unexpected_drift` compares the union of relative file paths and returns sorted POSIX-style names whose presence or digest differs and which are not allowlisted. Do not add PyPI dependencies or wildcard exclusions.
 
