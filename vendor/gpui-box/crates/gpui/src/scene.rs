@@ -242,13 +242,9 @@ impl Scene {
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.polychrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.blend_mode, sprite.tile.tile_id));
-        self.external_images.sort_by_key(|image| {
-            (
-                image.sprite.order,
-                image.sprite.blend_mode,
-                image.image.id(),
-            )
-        });
+        // Unlike atlas sprites, external images cannot be regrouped by texture:
+        // equal-order images may overlap, so their insertion order is semantic.
+        self.external_images.sort_by_key(|image| image.sprite.order);
         self.surfaces.sort_by_key(|surface| surface.order);
         self.backdrop_glass.sort_by_key(|glass| glass.order);
     }

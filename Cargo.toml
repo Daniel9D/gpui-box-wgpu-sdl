@@ -22,10 +22,10 @@ test-support = ["host"]
 kit = ["host", "dep:gpui-kit"]
 
 [dependencies]
-gpui-kit = { package = "gpui-box-kit", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2", default-features = false, optional = true }
-gpui = { package = "gpui-box", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2" }
-collections = { package = "gpui-box-collections", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2" }
-gpui_util = { package = "gpui-box-util", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2" }
+gpui-kit = { package = "gpui-box-kit", path = "vendor/gpui-box/crates/gpui-kit", default-features = false, optional = true }
+gpui = { package = "gpui-box", path = "vendor/gpui-box/crates/gpui" }
+collections = { package = "gpui-box-collections", path = "vendor/gpui-box/crates/collections" }
+gpui_util = { package = "gpui-box-util", path = "vendor/gpui-box/crates/gpui_util" }
 anyhow = "1.0.86"
 bytemuck = "1"
 cosmic-text = "0.19.0"
@@ -54,7 +54,7 @@ js-sys = "0.3"
 wgpu = { version = "30.0.1", features = ["webgl"] }
 
 [dev-dependencies]
-gpui = { package = "gpui-box", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2", features = ["test-support"] }
+gpui = { package = "gpui-box", path = "vendor/gpui-box/crates/gpui", features = ["test-support"] }
 image = { version = "0.25.1", default-features = false, features = ["png"] }
 env_logger = "0.11"
 naga = { version = "=30.0.0", features = ["wgsl-in"] }
@@ -64,6 +64,3 @@ members = ["crates/gpui-box-sdl"]
 default-members = [".", "crates/gpui-box-sdl"]
 exclude = ["vendor/gpui-box"]
 resolver = "3"
-
-[patch."https://github.com/fran0220/gpui-box.git"]
-gpui-box = { path = "vendor/gpui-box/crates/gpui" }

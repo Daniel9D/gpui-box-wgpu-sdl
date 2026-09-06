@@ -12,6 +12,12 @@ members = [
   "crates/gpui_web",
   "crates/gpui_wgpu",
   "crates/gpui_windows",
+  "crates/gpui-kit",
+  "crates/gpui-kit-assets",
+  "crates/gpui-kit-semantics",
+  "crates/gpui-kit-testkit",
+  "crates/gpui-kit-theme",
+  "crates/gpui-kit-tokens",
   "crates/http_client",
   "crates/media",
   "crates/refineable",
@@ -20,7 +26,7 @@ members = [
   "crates/sum_tree",
   "crates/util_macros",
 ]
-default-members = ["crates/gpui"]
+default-members = ["crates/gpui", "crates/gpui-kit"]
 # Its own workspace on purpose: the cross-platform visual harness has
 # renderer-specific dependencies and keeps an independent lockfile. Both
 # workspaces consume the same local GPUI Box packages. The vendored `block`

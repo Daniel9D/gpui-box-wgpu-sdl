@@ -1,0 +1,23 @@
+[package]
+name = "gpui-box-kit-assets"
+description = "Licensed fonts and generic icon assets for GPUI Box Kit"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "gpui_kit_assets"
+
+[dependencies]
+gpui.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# Reads the bundled faces' character maps, so a claim about what the bundle
+# covers is checked against the bytes rather than against a comment.
+ttf-parser = "0.25"
+
+[lints]
+workspace = true

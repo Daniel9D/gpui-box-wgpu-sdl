@@ -7,7 +7,7 @@ use std::{
 };
 
 use gpui::{App, Context, FocusHandle, IntoElement, Render, Window, div, prelude::*, px, rgb};
-use gpui_wgpu::{CosmicTextSystem, ExternalGpu, WgpuHost};
+use gpui_wgpu::{CosmicTextSystem, ExternalGpu, WgpuHost, WgpuImage};
 
 const EXTENT: wgpu::Extent3d = wgpu::Extent3d {
     width: 256,
@@ -24,6 +24,18 @@ struct ProbeState {
 struct ProbeView {
     focus: FocusHandle,
     state: ProbeState,
+}
+
+struct ExternalImageView {
+    image: gpui::ImageSource,
+}
+
+impl Render for ExternalImageView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::img(self.image.clone())
+            .size_full()
+            .object_fit(gpui::ObjectFit::Fill)
+    }
 }
 
 impl Render for ProbeView {
@@ -56,6 +68,301 @@ struct Fixture {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     state: ProbeState,
+}
+
+#[test]
+fn wgpu_image_validation_accepts_sampled_2d_texture() {
+    let _gpu = gpu_test_guard();
+    let Some((_, _, device, _)) = gpu() else {
+        return;
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("valid_external_image"),
+        size: wgpu::Extent3d {
+            width: 32,
+            height: 16,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+
+    let image = WgpuImage::new(texture.create_view(&Default::default())).unwrap();
+    assert_eq!(
+        image.size(),
+        gpui::size(gpui::DevicePixels(32), gpui::DevicePixels(16))
+    );
+    let _: gpui::ImageSource = image.into();
+}
+
+#[test]
+fn wgpu_image_validation_rejects_unsupported_texture_properties() {
+    let _gpu = gpu_test_guard();
+    let Some((_, _, device, _)) = gpu() else {
+        return;
+    };
+    let cases = [
+        (
+            "one-dimensional",
+            wgpu::Extent3d {
+                width: 32,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            wgpu::TextureDimension::D1,
+            1,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::TEXTURE_BINDING,
+        ),
+        (
+            "array",
+            wgpu::Extent3d {
+                width: 32,
+                height: 16,
+                depth_or_array_layers: 2,
+            },
+            wgpu::TextureDimension::D2,
+            1,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::TEXTURE_BINDING,
+        ),
+        (
+            "multisampled",
+            wgpu::Extent3d {
+                width: 32,
+                height: 16,
+                depth_or_array_layers: 1,
+            },
+            wgpu::TextureDimension::D2,
+            4,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        ),
+        (
+            "not-bindable",
+            wgpu::Extent3d {
+                width: 32,
+                height: 16,
+                depth_or_array_layers: 1,
+            },
+            wgpu::TextureDimension::D2,
+            1,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::COPY_DST,
+        ),
+        (
+            "integer-format",
+            wgpu::Extent3d {
+                width: 32,
+                height: 16,
+                depth_or_array_layers: 1,
+            },
+            wgpu::TextureDimension::D2,
+            1,
+            wgpu::TextureFormat::Rgba8Uint,
+            wgpu::TextureUsages::TEXTURE_BINDING,
+        ),
+    ];
+
+    for (label, size, dimension, sample_count, format, usage) in cases {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count,
+            dimension,
+            format,
+            usage,
+            view_formats: &[],
+        });
+        assert!(
+            WgpuImage::new(texture.create_view(&Default::default())).is_err(),
+            "{label} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn external_texture_view_updates_without_recreating_image() {
+    let _gpu = gpu_test_guard();
+    let Some((instance, adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let device = Arc::new(device);
+    let queue = Arc::new(queue);
+    let source_extent = wgpu::Extent3d {
+        width: 32,
+        height: 16,
+        depth_or_array_layers: 1,
+    };
+    let source = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("engine_owned_external_image"),
+        size: source_extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let image = WgpuImage::new(source.create_view(&Default::default())).unwrap();
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("external_image_target"),
+        size: EXTENT,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let target_view = target.create_view(&Default::default());
+    let root_image = image.clone();
+    let mut host = WgpuHost::new(
+        ExternalGpu {
+            instance,
+            adapter,
+            device: device.clone(),
+            queue: queue.clone(),
+        },
+        wgpu::TextureFormat::Rgba8Unorm,
+        gpui::size(px(256.), px(128.)),
+        Arc::new(CosmicTextSystem::new_without_system_fonts("sans-serif")),
+        Arc::new(()),
+        move |_, cx| {
+            cx.new(|_| ExternalImageView {
+                image: root_image.into(),
+            })
+        },
+    )
+    .unwrap();
+
+    write_solid_texture(&queue, &source, source_extent, [255, 0, 0, 255]);
+    host.render_to_view(&target_view, EXTENT, 1.).unwrap();
+    let red = read_texture(&device, &queue, &target, EXTENT);
+    assert_color_near(pixel(&red, EXTENT.width, 128, 64), [255, 0, 0, 255]);
+
+    write_solid_texture(&queue, &source, source_extent, [0, 255, 0, 255]);
+    host.render_to_view(&target_view, EXTENT, 1.).unwrap();
+    let green = read_texture(&device, &queue, &target, EXTENT);
+    assert_color_near(pixel(&green, EXTENT.width, 128, 64), [0, 255, 0, 255]);
+}
+
+#[test]
+fn external_image_from_another_device_returns_an_error() {
+    let _gpu = gpu_test_guard();
+    let Some((instance, adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let (other_device, _) = pollster::block_on(adapter.request_device(&Default::default()))
+        .expect("second device should be available");
+    let source = other_device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("external_image_from_another_device"),
+        size: wgpu::Extent3d {
+            width: 32,
+            height: 16,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let image = WgpuImage::new(source.create_view(&Default::default())).unwrap();
+    let device = Arc::new(device);
+    let queue = Arc::new(queue);
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("cross_device_external_image_target"),
+        size: EXTENT,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let target_view = target.create_view(&Default::default());
+    let mut host = WgpuHost::new(
+        ExternalGpu {
+            instance,
+            adapter,
+            device,
+            queue,
+        },
+        wgpu::TextureFormat::Rgba8Unorm,
+        gpui::size(px(256.), px(128.)),
+        Arc::new(CosmicTextSystem::new_without_system_fonts("sans-serif")),
+        Arc::new(()),
+        move |_, cx| {
+            cx.new(|_| ExternalImageView {
+                image: image.into(),
+            })
+        },
+    )
+    .unwrap();
+
+    let error = host
+        .render_to_view(&target_view, EXTENT, 1.)
+        .expect_err("an external image from another device must be rejected");
+    assert!(error.to_string().contains("external image"));
+}
+
+#[test]
+fn external_image_reports_an_unsupported_renderer_payload() {
+    let _gpu = gpu_test_guard();
+    let Some((instance, adapter, device, queue)) = gpu() else {
+        return;
+    };
+    let device = Arc::new(device);
+    let queue = Arc::new(queue);
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("unsupported_external_image_target"),
+        size: EXTENT,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let target_view = target.create_view(&Default::default());
+    let image = Arc::new(gpui::ExternalImageHandle::new(
+        gpui::size(gpui::DevicePixels(32), gpui::DevicePixels(16)),
+        (),
+    ));
+    let mut host = WgpuHost::new(
+        ExternalGpu {
+            instance,
+            adapter,
+            device,
+            queue,
+        },
+        wgpu::TextureFormat::Rgba8Unorm,
+        gpui::size(px(256.), px(128.)),
+        Arc::new(CosmicTextSystem::new_without_system_fonts("sans-serif")),
+        Arc::new(()),
+        move |_, cx| {
+            cx.new(|_| ExternalImageView {
+                image: image.into(),
+            })
+        },
+    )
+    .unwrap();
+
+    let error = host
+        .render_to_view(&target_view, EXTENT, 1.)
+        .expect_err("unknown external payload must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported external image payload")
+    );
 }
 
 #[test]
@@ -314,6 +621,29 @@ fn pixel(rgba: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
     rgba[offset..offset + 4].try_into().unwrap()
 }
 
+fn write_solid_texture(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    extent: wgpu::Extent3d,
+    color: [u8; 4],
+) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &color.repeat((extent.width * extent.height) as usize),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(extent.width * 4),
+            rows_per_image: Some(extent.height),
+        },
+        extent,
+    );
+}
+
 fn read_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -372,13 +702,9 @@ fn read_texture(
 #[test]
 fn kit_input_and_button_use_the_engine_device() {
     use gpui::Focusable;
-    use gpui_kit::component::{
-        Root,
-        button::Button,
-        input::{Input, InputState},
-    };
+    use gpui_kit::{controls::input::TextInput, prelude::Button};
     struct KitView {
-        input: gpui::Entity<InputState>,
+        input: gpui::Entity<TextInput>,
         clicks: Rc<Cell<u32>>,
     }
     impl Render for KitView {
@@ -392,12 +718,9 @@ fn kit_input_and_button_use_the_engine_device() {
                 .child(
                     Button::new("button")
                         .label("Apply")
-                        .tooltip("Apply changes")
-                        .w(px(100.))
-                        .h(px(32.))
-                        .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                        .on_click(move |_, _| clicks.set(clicks.get() + 1)),
                 )
-                .child(Input::new(&self.input))
+                .child(self.input.clone())
         }
     }
     let _gpu = gpu_test_guard();
@@ -435,14 +758,13 @@ fn kit_input_and_button_use_the_engine_device() {
         Arc::new(CosmicTextSystem::new("Segoe UI")),
         Arc::new(gpui_kit::assets::Assets),
         move |window, cx| {
-            gpui_kit::init(cx);
-            let input = cx.new(|cx| InputState::new(window, cx));
+            gpui_kit::install(cx);
+            let input = cx.new(|cx| TextInput::new("engine.input", window, cx));
             *root_input.borrow_mut() = Some(input.clone());
-            let content = cx.new(|_| KitView {
+            cx.new(|_| KitView {
                 input,
                 clicks: root_clicks,
-            });
-            cx.new(|cx| Root::new(content, window, cx))
+            })
         },
     )
     .unwrap();
@@ -454,18 +776,6 @@ fn kit_input_and_button_use_the_engine_device() {
     }))
     .unwrap();
     host.render_to_view(&target, EXTENT, 1.).unwrap();
-    let before_tooltip = read_texture(&device, &queue, &texture, EXTENT);
-    host.tick(std::time::Duration::from_secs(1));
-    host.render_to_view(&target, EXTENT, 1.).unwrap();
-    host.tick(std::time::Duration::from_millis(300));
-    host.render_to_view(&target, EXTENT, 1.).unwrap();
-    let after_tooltip = read_texture(&device, &queue, &texture, EXTENT);
-    // The tooltip paints outside the button, after engine-driven elapsed time.
-    let below_button = (EXTENT.width * 36 * 4) as usize;
-    assert_ne!(
-        &before_tooltip[below_button..],
-        &after_tooltip[below_button..]
-    );
     for down in [true, false] {
         let position = gpui::point(px(20.), px(16.));
         let event = if down {
@@ -496,7 +806,7 @@ fn kit_input_and_button_use_the_engine_device() {
         .unwrap();
     host.update(|window, cx| {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(" + paste".into()));
-        window.dispatch_action(Box::new(gpui_kit::component::input::Paste), cx);
+        window.dispatch_action(Box::new(gpui_kit::controls::input::Paste), cx);
     })
     .unwrap();
     host.tick(std::time::Duration::from_millis(16));
@@ -505,22 +815,4 @@ fn kit_input_and_button_use_the_engine_device() {
     host.render_to_view(&target, EXTENT, 1.).unwrap();
     drop(input);
     drop(input_slot);
-}
-
-#[cfg(feature = "kit")]
-#[test]
-fn backported_spring_matches_critical_damping_solution() {
-    use gpui_kit::base::motion::{SpringConfig, SpringState};
-    let config = SpringConfig::new(100., 20., 1.);
-    let state = config.step(
-        SpringState {
-            position: 0.,
-            velocity: 0.,
-        },
-        1.,
-        1.,
-    );
-    // x(t) = 1 - (1 + 10t) exp(-10t), v(t) = 100t exp(-10t).
-    assert!((state.position - 0.9995006).abs() < 0.000001);
-    assert!((state.velocity - 0.004539993).abs() < 0.000001);
 }

@@ -13,11 +13,10 @@ See [UPSTREAM.md](UPSTREAM.md) for provenance and licenses.
 ```toml
 [dependencies]
 gpui_wgpu = { package = "gpui-box-wgpu", path = "../gpui-box-wgpu" }
-gpui = { package = "gpui-box", git = "https://github.com/fran0220/gpui-box.git", rev = "5c7e9eb6de8c8db3e7ff659934166218fb60f9f2" }
 ```
 
-Use `gpui_wgpu::wgpu` for matching wgpu types. All GPUI dependencies in the
-consuming project must use the same source and revision to share Rust types.
+Use the `gpui_wgpu::wgpu` and `gpui_wgpu::gpui` re-exports so WGPU and GPUI
+types always match this fork's vendored snapshot.
 
 After pushing to your remote, replace these placeholders with its URL and an
 immutable commit. This is a template, not a published URL:
@@ -33,6 +32,7 @@ The package supports path and Git dependencies; crates.io publication is disable
 | default (empty) | Renderer, text system, native external-device rendering |
 | `host` | Native `WgpuHost`, GPUI headless context, image capture APIs |
 | `test-support` | Compatibility alias enabling `host` |
+| `kit` | `host` plus `gpui-box-kit` components with optional heavy features disabled |
 | `font-kit` | System font discovery |
 
 `host` enables `gpui/test-support` and the direct optional `image` dependency
@@ -122,6 +122,31 @@ platform and deterministic executor, not a full native platform. Committed text
 goes through the focused keystroke/input-handler path. Native clipboard, cursor,
 IME composition, accessibility, and other platform services need an app adapter.
 
+## Render an engine-owned texture with `img`
+
+Wrap the default full-resource view once and pass the cloneable handle directly
+to `gpui::img`:
+
+```no_run
+use gpui_wgpu::{WgpuImage, gpui, wgpu};
+use gpui::prelude::*;
+
+fn image(texture: &wgpu::Texture) -> anyhow::Result<impl gpui::IntoElement> {
+    let image = WgpuImage::new(texture.create_view(&Default::default()))?;
+    Ok(gpui::img(image).size_full())
+}
+```
+
+The texture stays owned by the engine. Queue writes submitted before
+`WgpuHost::render_to_view` are visible in that frame without CPU readback or an
+atlas upload. Recreate `WgpuImage` only when the engine recreates or resizes the
+texture.
+
+The underlying texture must be non-zero, single-sample, 2D, one layer, use a
+filterable float format, include `TEXTURE_BINDING`, and belong to the host's WGPU
+device. Pass its default full-resource view; array, cube, mip-subset, depth,
+integer, multisampled, and device-foreign views are unsupported.
+
 ## GPU ownership and target contract
 
 - The application creates GPU resources and the output texture. The renderer
@@ -187,34 +212,33 @@ adapter (Windows WARP or Linux llvmpipe).
 
 ## GPUI Kit on the embedded host
 
-Enable `features = ["kit"]` on `gpui-box-wgpu`, and depend on the adapted kit
-at `vendor/gpui-kit/crates/kit` (not the crates.io version):
+Enable `features = ["kit"]` on `gpui-box-wgpu`. The feature uses
+`gpui-box-kit` from the same pinned GPUI Box revision, with its optional native
+media and terminal features disabled:
 
 ```toml
 [dependencies]
 gpui_wgpu = { package = "gpui-box-wgpu", path = "../gpui-box-wgpu", features = ["kit"] }
-gpui-kit = { path = "../gpui-box-wgpu/vendor/gpui-kit/crates/kit" }
 ```
 
-The `kit` feature enables `host`. Default renderer builds do not compile the
-kit. The snapshot and its compatibility differences are documented in
-[vendor/gpui-kit/EMBEDDED.md](vendor/gpui-kit/EMBEDDED.md).
+The `kit` feature enables `host`; default renderer builds do not compile the
+kit. Import the matching vendored kit through `gpui_wgpu::gpui_kit`.
 
-In the `WgpuHost::new` root builder, initialize the kit once and wrap your view:
+In the `WgpuHost::new` root builder, install the kit before constructing the
+root view:
 
 ```ignore
-// Pass Arc::new(gpui_kit::assets::Assets) as the host asset source,
-// and a text system with the fonts your theme uses.
+// Pass Arc::new(gpui_kit::assets::Assets) as the host asset source.
 move |window, cx| {
-    gpui_kit::init(cx);
-    let content = cx.new(|cx| MyView::new(window, cx));
-    cx.new(|cx| gpui_kit::component::Root::new(content, window, cx))
+    use gpui_wgpu::gpui_kit;
+    gpui_kit::install(cx);
+    cx.new(|cx| MyView::new(window, cx))
 }
 ```
 
-Use `gpui_kit::*` for GPUI types and `gpui_kit::component::*` for controls.
-Do not call the upstream `application()` bootstrap; this embedded facade does
-not export it. SDL3 and your engine own the window and presentation.
+Import controls through `gpui_kit::prelude` or their module paths. The kit does
+not own the application bootstrap; SDL3 and your engine keep ownership of the
+window and presentation.
 
 Each engine frame:
 
@@ -240,20 +264,13 @@ that returns 404; components needing network resources require an
 engine-provided service. `tick` retains the test dispatcher, not a native
 production event loop.
 
-The focused compatibility check is:
+The focused integration check is:
 
 ```text
 cargo test --features kit --test wgpu_host_gpu -- --test-threads=1
 ```
 
-It exercises external-device rendering, a kit button, Unicode input,
-in-process clipboard paste, and engine-driven timers. A GPU adapter is required
-for execution; without one the GPU tests report a skip.
-
-The vendored crates form an independent workspace. Compile every library and
-test target, then exercise the embedded facade with:
-
-```text
-cargo check --manifest-path vendor/gpui-kit/Cargo.toml --workspace --all-targets
-cargo test --manifest-path vendor/gpui-kit/Cargo.toml -p gpui-kit --all-features
-```
+It exercises external-device rendering, a kit button, Unicode input and
+in-process clipboard paste. The host test suite separately covers
+engine-driven timers. A GPU adapter is required for execution; without one the
+GPU tests report a skip.

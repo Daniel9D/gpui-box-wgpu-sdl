@@ -1518,16 +1518,8 @@ fn visible_image_region(
         Bounds {
             origin: point(DevicePixels(source_x), DevicePixels(source_y)),
             size: size(
-                DevicePixels(
-                    source_width
-                        .min(image_size.width.0 - source_x)
-                        .max(0),
-                ),
-                DevicePixels(
-                    source_height
-                        .min(image_size.height.0 - source_y)
-                        .max(0),
-                ),
+                DevicePixels(source_width.min(image_size.width.0 - source_x).max(0)),
+                DevicePixels(source_height.min(image_size.height.0 - source_y).max(0)),
             ),
         },
     ))
@@ -5549,8 +5541,7 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let image_size = image.size();
-        let Some((visible_bounds, source)) =
-            visible_image_region(bounds, image_bounds, image_size)
+        let Some((visible_bounds, source)) = visible_image_region(bounds, image_bounds, image_size)
         else {
             return;
         };
@@ -5617,8 +5608,7 @@ impl Window {
             "It's the caller's job to pass a valid frame index"
         );
         let frame_size = data.size(frame_index);
-        let Some((visible_bounds, source)) =
-            visible_image_region(bounds, image_bounds, frame_size)
+        let Some((visible_bounds, source)) = visible_image_region(bounds, image_bounds, frame_size)
         else {
             return Ok(());
         };

@@ -5,14 +5,19 @@ mod wgpu_atlas;
 mod wgpu_context;
 #[cfg(all(not(target_family = "wasm"), feature = "host"))]
 mod wgpu_host;
+mod wgpu_image;
 mod wgpu_renderer;
 
 pub use cosmic_text_system::*;
+pub use gpui;
+#[cfg(feature = "kit")]
+pub use gpui_kit;
 pub use wgpu;
 pub use wgpu_atlas::*;
 pub use wgpu_context::*;
 #[cfg(all(not(target_family = "wasm"), feature = "host"))]
 pub use wgpu_host::*;
+pub use wgpu_image::*;
 #[cfg(not(target_family = "wasm"))]
 pub use wgpu_renderer::WgpuHeadlessRenderer;
 pub use wgpu_renderer::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};

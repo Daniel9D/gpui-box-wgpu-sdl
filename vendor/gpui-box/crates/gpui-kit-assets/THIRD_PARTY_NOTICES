@@ -1,0 +1,54 @@
+THIRD-PARTY NOTICES — gpui-box-kit-assets
+================================================================================
+
+Geist and Geist Mono
+--------------------------------------------------------------------------------
+Source: https://vercel.com/font
+License: SIL Open Font License 1.1
+Copyright 2023 Vercel Inc.
+Reserved Font Names: "Geist" and "Geist Mono".
+Files: assets/fonts/Geist*.ttf
+License text: licenses/OFL-1.1.txt
+
+Noto Sans Symbols and Noto Sans Symbols 2
+--------------------------------------------------------------------------------
+Source: https://github.com/notofonts/notofonts.github.io
+Revision: c16b117609abbe4e60b3f2bd4433bdb3d0accb2e
+License: SIL Open Font License 1.1, no Reserved Font Name
+Copyright 2022 The Noto Project Authors
+Files: assets/fonts/KeySymbols.ttf
+License text: licenses/OFL-1.1.txt
+
+Noto Sans Arabic and Noto Sans Hebrew
+--------------------------------------------------------------------------------
+Source: https://github.com/google/fonts
+Revision: 352f6b7d9d6cc4fa9e242b931291d31b21a6dc84
+Versions: Noto Sans Arabic 2.012; Noto Sans Hebrew 3.001
+License: SIL Open Font License 1.1, no Reserved Font Name
+Copyright 2022 The Noto Project Authors (Arabic)
+Copyright 2022 The Noto Project Authors (Hebrew)
+Files: assets/fonts/NotoSansArabic.ttf, assets/fonts/NotoSansHebrew.ttf
+Checksums and exact upstream paths: assets/SOURCE.md
+License text: licenses/OFL-1.1.txt
+
+Noto Sans CJK SC
+--------------------------------------------------------------------------------
+Source: https://github.com/notofonts/noto-cjk
+Revision: f8d157532fbfaeda587e826d4cd5b21a49186f7c
+License: SIL Open Font License 1.1, no Reserved Font Name
+Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name
+'Source'. Noto is a trademark of Google Inc.
+Files: assets/fonts/NotoSansSC.otf
+Checksums and exact upstream paths: assets/SOURCE.md
+License text: licenses/OFL-1.1.txt
+
+Phosphor Icons Core 2.1.1
+--------------------------------------------------------------------------------
+Source: https://github.com/phosphor-icons/core
+Revision: 2b75f3ad12b420c9504ef05df8d2564a28f8500e
+License: MIT
+Copyright (c) 2023 Phosphor Icons
+Files: the Regular and Fill subset under assets/icons
+Selection, checksums, and import recipe: assets/PHOSPHOR.toml,
+assets/icons/SHA256SUMS, and assets/SOURCE.md
+License text: licenses/PHOSPHOR-MIT.txt

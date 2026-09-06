@@ -905,6 +905,34 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn external_images_with_the_same_draw_order_keep_paint_order(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let older = Arc::new(crate::ExternalImageHandle::new(
+            size(DevicePixels(1), DevicePixels(1)),
+            "older",
+        ));
+        let newer = Arc::new(crate::ExternalImageHandle::new(
+            size(DevicePixels(1), DevicePixels(1)),
+            "newer",
+        ));
+
+        window.draw(point(px(0.), px(0.)), size(px(10.), px(10.)), |_, _| {
+            div()
+                .child(img(newer.clone()).size_full())
+                .child(img(older.clone()).size_full())
+                .into_any_element()
+        });
+
+        window.update(|window, _| {
+            let images = &window.rendered_frame.scene.external_images;
+            assert_eq!(images.len(), 2);
+            assert_eq!(images[0].image.id(), newer.id());
+            assert_eq!(images[1].image.id(), older.id());
+            assert_eq!(images[0].sprite.order, images[1].sprite.order);
+        });
+    }
+
     fn test_image(frame_count: usize) -> Arc<RenderImage> {
         let frame = Frame::new(ImageBuffer::from_pixel(1, 1, Rgba([0, 0, 0, 0])));
         Arc::new(RenderImage::new(SmallVec::from_iter(

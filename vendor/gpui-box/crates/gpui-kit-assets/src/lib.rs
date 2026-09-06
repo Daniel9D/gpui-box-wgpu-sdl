@@ -1,0 +1,260 @@
+//! Embedded Geist fonts and product-neutral SVG icons.
+//!
+//! See `assets/SOURCE.md` and the repository `THIRD_PARTY_NOTICES`.
+
+use std::borrow::Cow;
+use std::sync::OnceLock;
+
+use gpui::{App, AssetSource, FontFallbacks, Global, Result, SharedString, Styled as _, Svg, svg};
+
+mod icons;
+
+pub use icons::{Icon, IconName, IconWeight, Mirroring, PHOSPHOR_REVISION, PHOSPHOR_VERSION};
+
+struct EmbeddedFonts;
+
+impl Global for EmbeddedFonts {}
+
+#[derive(Debug)]
+pub struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        Ok(icons::load(path))
+    }
+
+    fn list(&self, prefix: &str) -> Result<Vec<SharedString>> {
+        Ok(icons::ALL_PATHS
+            .iter()
+            .copied()
+            .filter(|path| path.starts_with(prefix))
+            .map(SharedString::from)
+            .collect())
+    }
+}
+
+pub fn icon(icon: Icon) -> Svg {
+    svg().path(icon.path()).flex_none()
+}
+
+static FONT_GEIST: &[u8] = include_bytes!("../assets/fonts/Geist.ttf");
+static FONT_GEIST_MONO: &[u8] = include_bytes!("../assets/fonts/GeistMono.ttf");
+static FONT_GEIST_MEDIUM: &[u8] = include_bytes!("../assets/fonts/Geist-Medium.ttf");
+static FONT_GEIST_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Geist-SemiBold.ttf");
+static FONT_GEIST_BOLD: &[u8] = include_bytes!("../assets/fonts/Geist-Bold.ttf");
+static FONT_NOTO_SANS_ARABIC: &[u8] = include_bytes!("../assets/fonts/NotoSansArabic.ttf");
+static FONT_NOTO_SANS_HEBREW: &[u8] = include_bytes!("../assets/fonts/NotoSansHebrew.ttf");
+/// The seven keyboard symbols `Kbd` can emit that no Geist face draws.
+///
+/// Without it those glyphs render only where the platform happens to own a
+/// font that covers them, which made the library's own output depend on what
+/// the host machine had installed. See `assets/SOURCE.md`.
+static FONT_KEY_SYMBOLS: &[u8] = include_bytes!("../assets/fonts/KeySymbols.ttf");
+/// Simplified Chinese, and with it the Han characters Japanese and Korean
+/// share. Geist covers none of them, so without this every CJK string in a
+/// component renders as whatever the host machine happens to have — and, in
+/// the headless harness, which deliberately has nothing, as tofu.
+static FONT_NOTO_SANS_SC: &[u8] = include_bytes!("../assets/fonts/NotoSansSC.otf");
+
+pub fn font_bytes() -> [&'static [u8]; 9] {
+    [
+        FONT_GEIST,
+        FONT_GEIST_MONO,
+        FONT_GEIST_MEDIUM,
+        FONT_GEIST_SEMIBOLD,
+        FONT_GEIST_BOLD,
+        FONT_NOTO_SANS_ARABIC,
+        FONT_NOTO_SANS_HEBREW,
+        FONT_NOTO_SANS_SC,
+        FONT_KEY_SYMBOLS,
+    ]
+}
+
+/// The deterministic script fallbacks carried by every Kit text style.
+pub fn text_fallbacks() -> FontFallbacks {
+    static FALLBACKS: OnceLock<FontFallbacks> = OnceLock::new();
+    FALLBACKS
+        .get_or_init(|| {
+            FontFallbacks::from_fonts(vec![
+                "Noto Sans Arabic".to_owned(),
+                "Noto Sans Hebrew".to_owned(),
+                "Noto Sans SC".to_owned(),
+            ])
+        })
+        .clone()
+}
+
+/// The fallbacks a keystroke needs on top of the script ones.
+///
+/// The bundled face is registered either way, but a face nobody names is a
+/// face the shaper never reaches: `⏎`, `⌫`, `⌦`, `⌘`, `⌃`, `⌥` and `␣` are
+/// drawn by none of the Geist faces, so a keycap that does not carry this
+/// list renders whichever of them the host machine happens to cover and a
+/// blank box for the rest.
+pub fn key_fallbacks() -> FontFallbacks {
+    static FALLBACKS: OnceLock<FontFallbacks> = OnceLock::new();
+    FALLBACKS
+        .get_or_init(|| {
+            FontFallbacks::from_fonts(vec![
+                KEY_SYMBOLS_FAMILY.to_owned(),
+                "Noto Sans Arabic".to_owned(),
+                "Noto Sans Hebrew".to_owned(),
+            ])
+        })
+        .clone()
+}
+
+/// The family the bundled keyboard-symbol face publishes.
+pub const KEY_SYMBOLS_FAMILY: &str = "GPUI Kit Key Symbols";
+
+pub fn register_fonts(cx: &mut App) {
+    if cx.has_global::<EmbeddedFonts>() {
+        return;
+    }
+    let fonts = font_bytes().into_iter().map(Cow::Borrowed).collect();
+    if let Err(error) = cx.text_system().add_fonts(fonts) {
+        tracing::warn!(%error, "GPUI Box could not register embedded fonts");
+    }
+    cx.set_global(EmbeddedFonts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_icon_is_embedded_svg() {
+        let assets = Assets;
+        for name in IconName::ALL {
+            for weight in IconWeight::ALL {
+                let icon = Icon::new(*name).with_weight(*weight);
+                let bytes = assets
+                    .load(icon.path())
+                    .expect("asset lookup")
+                    .expect("registered icon");
+                let text = std::str::from_utf8(&bytes).expect("UTF-8 SVG");
+                assert!(text.contains("<svg"));
+                assert!(text.contains("viewBox=\"0 0 256 256\""));
+                assert!(text.contains("currentColor"));
+            }
+        }
+    }
+
+    #[test]
+    fn regular_is_the_resting_weight_and_fill_is_explicit() {
+        assert_eq!(Icon::Star.weight(), IconWeight::Regular);
+        assert_eq!(Icon::Star.filled().weight(), IconWeight::Fill);
+        assert_eq!(Icon::StarFilled, Icon::Star.filled());
+        assert_eq!(IconName::ALL.len(), 76);
+        assert_eq!(Icon::ALL.len(), IconName::ALL.len());
+    }
+
+    #[test]
+    fn brand_icons_are_not_part_of_the_generic_catalog() {
+        let assets = Assets;
+        for path in [
+            "icons/comet-logo.svg",
+            "icons/claude-mark.svg",
+            "icons/openai-mark.svg",
+            "icons/cursor-mark.svg",
+        ] {
+            assert!(assets.load(path).expect("lookup").is_none());
+        }
+    }
+
+    #[test]
+    fn a_direction_bearing_glyph_mirrors_and_a_symbol_does_not() {
+        assert!(Icon::AltArrowRight.mirrors_in_rtl());
+        assert!(Icon::ArrowLeft.mirrors_in_rtl());
+        assert!(Icon::Magnifier.mirrors_in_rtl());
+        assert!(!Icon::Check.mirrors_in_rtl());
+        assert!(!Icon::Settings.mirrors_in_rtl());
+        assert!(!Icon::Global.mirrors_in_rtl());
+        // A vertical axis is not a reading axis.
+        assert!(!Icon::AltArrowDown.mirrors_in_rtl());
+        assert!(!Icon::SortVertical.mirrors_in_rtl());
+    }
+
+    #[test]
+    fn every_icon_carries_a_mirroring_decision() {
+        // The generated match is total, so the check that matters here is that
+        // the catalog was actually thought about rather than answered one way.
+        let directional = Icon::ALL
+            .iter()
+            .filter(|icon| icon.mirrors_in_rtl())
+            .count();
+        assert!(directional > 0);
+        assert!(directional < Icon::ALL.len());
+    }
+
+    #[test]
+    fn bundled_fonts_are_not_placeholders() {
+        for bytes in font_bytes() {
+            assert!(bytes.len() > 1024);
+        }
+    }
+
+    #[test]
+    fn script_fallbacks_are_stable_and_ordered() {
+        assert_eq!(
+            text_fallbacks().fallback_list(),
+            ["Noto Sans Arabic", "Noto Sans Hebrew", "Noto Sans SC"]
+        );
+    }
+
+    /// A face that is bundled but not named in the fallback list is a face the
+    /// shaper never reaches, which is the mistake `key_fallbacks` documents.
+    /// CJK is the case where it costs the most: Geist covers none of it, so an
+    /// unnamed face means every Chinese string in the library falls through to
+    /// whatever the host happens to have — and in the headless harness, which
+    /// deliberately has nothing, to tofu in a picture nobody can fail.
+    #[test]
+    fn the_cjk_face_is_bundled_and_named() {
+        assert!(font_bytes().contains(&FONT_NOTO_SANS_SC));
+        assert!(
+            text_fallbacks()
+                .fallback_list()
+                .contains(&"Noto Sans SC".to_owned())
+        );
+    }
+
+    /// The symbols a keystroke is written with on macOS.
+    const KEY_SYMBOLS: [char; 7] = ['⏎', '⌫', '⌦', '␣', '⌘', '⌃', '⌥'];
+
+    #[test]
+    fn the_key_symbol_face_publishes_the_family_the_fallback_list_names() {
+        // A fallback list is resolved by family name. A name that matches
+        // nothing is dropped in silence, which is indistinguishable from
+        // having no fallback at all until a glyph goes missing in a picture.
+        let face = ttf_parser::Face::parse(FONT_KEY_SYMBOLS, 0).expect("parse the bundled face");
+        let family = face
+            .names()
+            .into_iter()
+            .find(|name| name.name_id == ttf_parser::name_id::FAMILY && name.is_unicode())
+            .and_then(|name| name.to_string())
+            .expect("the bundled face names a family");
+        assert_eq!(family, KEY_SYMBOLS_FAMILY);
+        assert_eq!(key_fallbacks().fallback_list()[0], KEY_SYMBOLS_FAMILY);
+    }
+
+    #[test]
+    fn the_key_symbol_face_covers_every_symbol_the_text_faces_do_not() {
+        let symbols = ttf_parser::Face::parse(FONT_KEY_SYMBOLS, 0).expect("parse the bundled face");
+        for symbol in KEY_SYMBOLS {
+            assert!(
+                symbols.glyph_index(symbol).is_some(),
+                "the bundled key face does not draw {symbol:?}, so a keycap \
+                 showing it falls back to whatever the host installed"
+            );
+        }
+    }
+
+    #[test]
+    fn the_key_symbol_face_is_reachable_only_as_a_fallback() {
+        // It carries no `m`, which is what a text system measures an em with,
+        // so it is not a family anything may ask for by name. That is exactly
+        // why it has to survive being named in a fallback list.
+        let symbols = ttf_parser::Face::parse(FONT_KEY_SYMBOLS, 0).expect("parse the bundled face");
+        assert!(symbols.glyph_index('m').is_none());
+    }
+}

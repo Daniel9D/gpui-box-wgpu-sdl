@@ -1615,15 +1615,15 @@ dependencies = [
  "futures",
  "futures-concurrency",
  "getrandom 0.3.4",
- "gpui-box-collections 0.1.2",
+ "gpui-box-collections",
  "gpui-box-http-client",
  "gpui-box-macros",
- "gpui-box-media 0.1.2",
+ "gpui-box-media",
  "gpui-box-refineable",
  "gpui-box-scheduler",
  "gpui-box-shared-string",
  "gpui-box-sum-tree",
- "gpui-box-util 0.1.2",
+ "gpui-box-util",
  "gpui-box-util-macros",
  "heapless",
  "image",
@@ -1675,17 +1675,7 @@ dependencies = [
 name = "gpui-box-collections"
 version = "0.1.2"
 dependencies = [
- "gpui-box-util 0.1.2",
- "indexmap",
- "rustc-hash 2.1.3",
-]
-
-[[package]]
-name = "gpui-box-collections"
-version = "0.1.2"
-source = "git+https://github.com/fran0220/gpui-box.git?rev=5c7e9eb6de8c8db3e7ff659934166218fb60f9f2#5c7e9eb6de8c8db3e7ff659934166218fb60f9f2"
-dependencies = [
- "gpui-box-util 0.1.2 (git+https://github.com/fran0220/gpui-box.git?rev=5c7e9eb6de8c8db3e7ff659934166218fb60f9f2)",
+ "gpui-box-util",
  "indexmap",
  "rustc-hash 2.1.3",
 ]
@@ -1712,14 +1702,13 @@ dependencies = [
 [[package]]
 name = "gpui-box-kit"
 version = "0.1.2"
-source = "git+https://github.com/fran0220/gpui-box.git?rev=5c7e9eb6de8c8db3e7ff659934166218fb60f9f2#5c7e9eb6de8c8db3e7ff659934166218fb60f9f2"
 dependencies = [
  "gpui-box",
  "gpui-box-kit-assets",
  "gpui-box-kit-semantics",
  "gpui-box-kit-theme",
  "gpui-box-kit-tokens",
- "gpui-box-media 0.1.2 (git+https://github.com/fran0220/gpui-box.git?rev=5c7e9eb6de8c8db3e7ff659934166218fb60f9f2)",
+ "gpui-box-media",
  "pulldown-cmark",
  "serde",
  "serde_json",
@@ -1731,7 +1720,6 @@ dependencies = [
 [[package]]
 name = "gpui-box-kit-assets"
 version = "0.1.2"
-source = "git+https://github.com/fran0220/gpui-box.git?rev=5c7e9eb6de8c8db3e7ff659934166218fb60f9f2#5c7e9eb6de8c8db3e7ff659934166218fb60f9f2"
 dependencies = [
  "gpui-box",
  "tracing",
@@ -1740,7 +1728,6 @@ dependencies = [
 [[package]]
 name = "gpui-box-kit-semantics"
 version = "0.1.2"
-source = "git+https://github.com/fran0220/gpui-box.git?rev=5c7e9eb6de8c8db3e7ff659934166218fb60f9f2#5c7e9eb6de8c8db3e7ff659934166218fb60f9f2"
 dependencies = [
  "gpui-box",
  "serde",
@@ -1749,7 +1736,6 @@ dependencies = [
 [[package]]
 name = "gpui-box-kit-theme"
 version = "0.1.2"
-source = "git+https://github.com/fran0220/gpui-box.git?rev=5c7e9eb6de8c8db3e7ff659934166218fb60f9f2#5c7e9eb6de8c8db3e7ff659934166218fb60f9f2"
 dependencies = [
  "gpui-box",
  "gpui-box-kit-tokens",
@@ -1758,7 +1744,6 @@ dependencies = [
 [[package]]
 name = "gpui-box-kit-tokens"
 version = "0.1.2"
-source = "git+https://github.com/fran0220/gpui-box.git?rev=5c7e9eb6de8c8db3e7ff659934166218fb60f9f2#5c7e9eb6de8c8db3e7ff659934166218fb60f9f2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1791,14 +1776,6 @@ dependencies = [
  "url",
  "windows 0.61.3",
  "windows-core 0.61.2",
-]
-
-[[package]]
-name = "gpui-box-media"
-version = "0.1.2"
-source = "git+https://github.com/fran0220/gpui-box.git?rev=5c7e9eb6de8c8db3e7ff659934166218fb60f9f2#5c7e9eb6de8c8db3e7ff659934166218fb60f9f2"
-dependencies = [
- "anyhow",
 ]
 
 [[package]]
@@ -1871,16 +1848,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpui-box-util"
-version = "0.1.2"
-source = "git+https://github.com/fran0220/gpui-box.git?rev=5c7e9eb6de8c8db3e7ff659934166218fb60f9f2#5c7e9eb6de8c8db3e7ff659934166218fb60f9f2"
-dependencies = [
- "anyhow",
- "log",
- "which",
-]
-
-[[package]]
 name = "gpui-box-util-macros"
 version = "0.1.2"
 dependencies = [
@@ -1898,9 +1865,9 @@ dependencies = [
  "env_logger",
  "etagere",
  "gpui-box",
- "gpui-box-collections 0.1.2 (git+https://github.com/fran0220/gpui-box.git?rev=5c7e9eb6de8c8db3e7ff659934166218fb60f9f2)",
+ "gpui-box-collections",
  "gpui-box-kit",
- "gpui-box-util 0.1.2 (git+https://github.com/fran0220/gpui-box.git?rev=5c7e9eb6de8c8db3e7ff659934166218fb60f9f2)",
+ "gpui-box-util",
  "image",
  "itertools 0.14.0",
  "js-sys",

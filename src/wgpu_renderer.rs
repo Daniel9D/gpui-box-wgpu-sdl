@@ -1,16 +1,17 @@
-use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
+use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext, wgpu_image::WgpuImagePayload};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
-    AtlasTextureId, BackdropGlass, Background, Bounds, DevicePixels, DrawOrder, GpuSpecs,
-    LUMINANCE_PROBE_SAMPLES, MAX_GLASS_LOBES, MAX_LUMINANCE_PROBES, NO_LUMINANCE_PROBE, Path,
-    Point, PrimitiveBatch, ScaledPixels, Scene, Size, SpriteBlendMode, get_gamma_correction_ratios,
-    probe_sample_luminance,
+    AtlasTextureId, BackdropGlass, Background, Bounds, DevicePixels, DrawOrder, ExternalImageId,
+    GpuSpecs, LUMINANCE_PROBE_SAMPLES, MAX_GLASS_LOBES, MAX_LUMINANCE_PROBES, NO_LUMINANCE_PROBE,
+    Path, Point, PrimitiveBatch, ScaledPixels, Scene, Size, SpriteBlendMode,
+    get_gamma_correction_ratios, probe_sample_luminance,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::ops::Range;
 use std::rc::Rc;
@@ -228,6 +229,7 @@ struct InstanceBindings {
     monochrome_sprites: InstanceBinding,
     subpixel_sprites: InstanceBinding,
     polychrome_sprites: InstanceBinding,
+    external_images: InstanceBinding,
 }
 
 struct WgpuBindGroupLayouts {
@@ -2142,6 +2144,7 @@ impl WgpuRenderer {
                     scene.polychrome_sprites.len(),
                 )
             })?;
+        let external_image_bind_groups = self.create_external_image_bind_groups(scene)?;
 
         let mut remaining_backdrop_passes = MAX_BACKDROP_GLASS_GAUSSIAN_RENDER_PASSES_PER_FRAME;
         let backdrop_pass_count = scene
@@ -2363,6 +2366,27 @@ impl WgpuRenderer {
                     // Surfaces are macOS-only for video playback and are not
                     // implemented by the WGPU renderer.
                     PrimitiveBatch::Surfaces(_surfaces) => {}
+                    PrimitiveBatch::ExternalImages {
+                        image_id,
+                        blend_mode,
+                        range,
+                    } => {
+                        let pipelines = &self.resources().pipelines;
+                        let pipeline = match blend_mode {
+                            SpriteBlendMode::Normal => &pipelines.poly_sprites_normal,
+                            SpriteBlendMode::Additive => &pipelines.poly_sprites_additive,
+                            SpriteBlendMode::Screen => &pipelines.poly_sprites_screen,
+                        };
+                        self.draw_bound_texture_sprites(
+                            &instance_bindings.external_images,
+                            external_image_bind_groups
+                                .get(&image_id)
+                                .context("external image bind group missing")?,
+                            pipeline,
+                            instance_range(range),
+                            &mut pass,
+                        );
+                    }
                 }
             }
             for glass in pending_glass {
@@ -2831,6 +2855,11 @@ impl WgpuRenderer {
         scene: &Scene,
         instance_offset: &mut u64,
     ) -> Result<InstanceBindings> {
+        let external_sprites = scene
+            .external_images
+            .iter()
+            .map(|image| image.sprite)
+            .collect::<Vec<_>>();
         Ok(InstanceBindings {
             quads: self.write_instance_binding(
                 "quads_bind_group",
@@ -2862,6 +2891,11 @@ impl WgpuRenderer {
                 instance_offset,
                 &scene.polychrome_sprites,
             )?,
+            external_images: self.write_instance_binding(
+                "external_images_bind_group",
+                instance_offset,
+                &external_sprites,
+            )?,
         })
     }
 
@@ -2887,6 +2921,41 @@ impl WgpuRenderer {
                     },
                 ],
             })
+    }
+
+    fn create_external_image_bind_groups(
+        &self,
+        scene: &Scene,
+    ) -> Result<HashMap<ExternalImageId, wgpu::BindGroup>> {
+        let mut bind_groups = HashMap::new();
+        for painted in &scene.external_images {
+            let image_id = painted.image.id();
+            if bind_groups.contains_key(&image_id) {
+                continue;
+            }
+            let payload = painted
+                .image
+                .downcast_ref::<WgpuImagePayload>()
+                .with_context(|| format!("unsupported external image payload for {image_id:?}"))?;
+            let device = &self.resources().device;
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let bind_group =
+                self.create_texture_bind_group("external_image_texture_bind_group", &payload.view);
+            #[cfg(not(target_family = "wasm"))]
+            if let Some(error) = pollster::block_on(scope.pop()) {
+                anyhow::bail!(
+                    "external image {image_id:?} is incompatible with this device: {error}"
+                );
+            }
+            #[cfg(target_family = "wasm")]
+            observe_error_scope(
+                scope,
+                "external image texture validation failed",
+                Arc::clone(&self.last_error),
+            );
+            bind_groups.insert(image_id, bind_group);
+        }
+        Ok(bind_groups)
     }
 
     fn draw_instances(
@@ -2920,12 +2989,39 @@ impl WgpuRenderer {
             return;
         }
         let texture_info = self.atlas.get_texture_info(texture_id);
-        let texture =
-            self.create_texture_bind_group("atlas_texture_bind_group", &texture_info.view);
+        self.draw_texture_sprites(sprite_instances, &texture_info.view, pipeline, range, pass);
+    }
+
+    fn draw_texture_sprites(
+        &self,
+        sprite_instances: &InstanceBinding,
+        texture_view: &wgpu::TextureView,
+        pipeline: &wgpu::RenderPipeline,
+        range: Range<u32>,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        if range.is_empty() {
+            return;
+        }
+        let texture = self.create_texture_bind_group("sprite_texture_bind_group", texture_view);
+        self.draw_bound_texture_sprites(sprite_instances, &texture, pipeline, range, pass);
+    }
+
+    fn draw_bound_texture_sprites(
+        &self,
+        sprite_instances: &InstanceBinding,
+        texture: &wgpu::BindGroup,
+        pipeline: &wgpu::RenderPipeline,
+        range: Range<u32>,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        if range.is_empty() {
+            return;
+        }
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &self.resources().globals_bind_group, &[]);
         pass.set_bind_group(1, &sprite_instances.bind_group, &[]);
-        pass.set_bind_group(2, &texture, &[]);
+        pass.set_bind_group(2, texture, &[]);
         pass.draw(
             0..4,
             sprite_instances.first_instance + range.start
@@ -3481,6 +3577,9 @@ fn batch_first_order(scene: &Scene, batch: &PrimitiveBatch) -> DrawOrder {
             scene.polychrome_sprites[range.start].order
         }
         PrimitiveBatch::Surfaces(range) => scene.surfaces[range.start].order,
+        PrimitiveBatch::ExternalImages { range, .. } => {
+            scene.external_images[range.start].sprite.order
+        }
     }
 }
 

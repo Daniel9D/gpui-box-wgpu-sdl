@@ -1,0 +1,110 @@
+//! Motion primitives that respect the user's reduced-motion preference.
+//!
+//! The layers build on each other:
+//!
+//! - [`CubicBezier`] and [`Easing`] name curves;
+//! - [`Spring`] solves physical motion in closed form;
+//! - [`MotionSpec`] pairs a curve with a duration and delay;
+//! - [`MotionRole`] names why a component moves and [`MotionPolicy`] resolves
+//!   that reason into the one theme-backed specification and reduced-motion
+//!   answer every component shares;
+//! - [`Interpolate`] moves a value between two states;
+//! - [`Keyframes`] takes a value through named stops rather than straight
+//!   across;
+//! - [`Transition`] animates a value whose target can change mid-flight,
+//!   carrying the speed it already had across a retarget;
+//! - [`VelocityTracker`] measures how fast a gesture is moving, which is what
+//!   [`flick`], [`rubber_band`] and [`Transition::release`] need;
+//! - [`ScrollLink`] reads a scroll offset as a progress, which is motion with
+//!   no clock in it at all;
+//! - [`Glide`] eases toward a target whose distance is not known until you
+//!   arrive, which is what scrolling a virtualized list to a row far off
+//!   screen is;
+//! - [`follow_end`] holds a growing surface against its own end, with a
+//!   [`Chase`] whose target keeps moving and which a gesture, not arriving
+//!   content, interrupts;
+//! - [`Presence`] keeps an element alive long enough to animate out, and plays
+//!   a phase backwards from where it had got to when the other cancels it;
+//! - [`Presenting`] is that lifecycle wearing one [`MotionRole`], which is
+//!   what a floating surface needs, and [`presenting`] is what it looks like
+//!   partway through — the appearance the `*_in` helpers apply, taken out of
+//!   the one-way timeline that keeps them from running backwards;
+//! - [`Stagger`] spreads one specification across a group, forwards or in
+//!   reverse;
+//! - [`Sequence`] runs specifications one after another and knows how long
+//!   they take together;
+//! - [`Motion`] writes a motion down instead of hiding it in the closure that
+//!   applies it, so what a run looks like at any point in it can be sampled
+//!   without a window; [`motion!`](crate::motion!) and
+//!   [`sequence!`](crate::sequence!) are how one is written;
+//! - [`Animator`] holds a run open as a playhead that can be played, paused,
+//!   reversed and scrubbed, and costs nothing while it is not moving;
+//! - [`Flipping::flip`] slides an element from where it was to where it is,
+//!   and [`Flipping::flip_size`] additionally resizes it;
+//! - [`Animated::animate_in`] puts any of this on an element in one call,
+//!   which is the layer most components should reach for.
+//!
+//! Motion never changes what a surface publishes. A slide, a press response
+//! and a counting number are all painted over a layout, a hit target and a
+//! semantic tree that already report the settled value.
+//!
+//! Decorative motion built on GPUI's `with_animation` already stops when
+//! [`gpui::App::reduce_motion`] is set. [`Transition::animate`] and
+//! [`Presence::animate`] honor the same preference by finishing immediately.
+
+mod animated;
+mod animator;
+mod busy;
+mod description;
+mod easing;
+mod flip;
+mod follow;
+mod gesture;
+mod glide;
+mod interpolate;
+pub(crate) mod keyed;
+mod keyframes;
+mod micro;
+mod policy;
+mod presence;
+mod scroll_link;
+mod sequence;
+mod spec;
+mod spring;
+mod stagger;
+mod transition;
+
+pub use animated::{Animated, Entrance};
+pub use animator::Animator;
+pub use busy::{Activity, breath, breathe, breathe_as, breathing_dot, spin, sweep};
+pub use description::{Motion, MotionProperty, MotionSample};
+pub use easing::{CubicBezier, Easing};
+pub use flip::{Flip, Flipped, Flipping, Shape, Shaping, flip, shared_flip, tracked_ids};
+pub use follow::{AtEnd, Chase, STICK_BAND, engage_end, follow_end, follows_end, release_end};
+pub use gesture::{
+    Flick, VELOCITY_WINDOW, Velocity, VelocityTracker, flick, overscroll, rubber_band,
+};
+pub use glide::Glide;
+pub use interpolate::Interpolate;
+pub use keyframes::{Keyframe, Keyframes};
+pub use micro::{Micro, MicroMark, MicroMotion, micro};
+pub use policy::{MotionDisposition, MotionPolicy, MotionRole, ResolvedMotion};
+pub use presence::{Phase, Presence, Presenting};
+pub use scroll_link::ScrollLink;
+pub use sequence::Sequence;
+pub use spec::{
+    MotionSpec, content_in, dialog, dialog_arrival, dialog_in, entrance, fade_in, gradient_opacity,
+    menu, menu_in, presenting, pulse_wave, resize, row_in, shimmer_offset, state_change,
+    surface_in, tracking,
+};
+pub use spring::Spring;
+pub use stagger::{Stagger, StaggerBudget, row_stagger_cap, staggered_phase};
+pub use transition::Transition;
+pub(crate) use transition::{tracked, tracked_or_snap};
+
+pub use gpui::AnimationExt;
+
+/// Whether the user asked for non-essential motion to be suppressed.
+pub fn reduce_motion(cx: &gpui::App) -> bool {
+    cx.reduce_motion()
+}
