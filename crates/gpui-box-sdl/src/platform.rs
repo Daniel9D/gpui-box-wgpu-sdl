@@ -126,7 +126,9 @@ impl Drop for SdlCursor {
 /// Synchronizes SDL's UTF-8 clipboard and cursor with a [`gpui_wgpu::WgpuHost`].
 #[derive(Default)]
 pub struct SdlPlatformBridge {
+    #[cfg(feature = "wgpu-runtime")]
     cursor: SdlCursor,
+    #[cfg(feature = "wgpu-runtime")]
     last_clipboard: Option<String>,
 }
 
@@ -136,6 +138,7 @@ impl SdlPlatformBridge {
     }
 
     /// Imports the current SDL clipboard before dispatching paste input to GPUI.
+    #[cfg(feature = "wgpu-runtime")]
     pub fn pull_clipboard(&mut self, host: &mut gpui_wgpu::WgpuHost) -> anyhow::Result<()> {
         let text = clipboard_text()?;
         host.set_clipboard_text(text.clone());
@@ -144,6 +147,7 @@ impl SdlPlatformBridge {
     }
 
     /// Exports changed GPUI clipboard text after dispatching input or actions.
+    #[cfg(feature = "wgpu-runtime")]
     pub fn push_clipboard(&mut self, host: &mut gpui_wgpu::WgpuHost) -> anyhow::Result<()> {
         let Some(text) = host.clipboard_text() else {
             return Ok(());
@@ -156,6 +160,7 @@ impl SdlPlatformBridge {
     }
 
     /// Applies the host cursor state after input dispatch or a rendered frame.
+    #[cfg(feature = "wgpu-runtime")]
     pub fn sync_cursor(&mut self, host: &gpui_wgpu::WgpuHost) -> anyhow::Result<()> {
         self.cursor
             .apply(host.cursor_style(), host.is_cursor_visible())

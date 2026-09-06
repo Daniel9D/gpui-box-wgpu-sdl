@@ -1,5 +1,8 @@
 # Changelog
 
+- Expose `ThreadedDispatcher` to production embedded platforms instead of
+  requiring GPUI's `test-support` feature.
+
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Entries say what the library now does and what it refuses to do, because a
 refusal is the part a caller has to plan around.

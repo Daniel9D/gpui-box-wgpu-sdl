@@ -15,13 +15,14 @@ path = "src/lib.rs"
 cognitive_complexity = "deny"
 
 [features]
-default = ["build-from-source"]
+default = ["build-from-source", "wgpu-runtime"]
 build-from-source = ["sdl3-sys/build-from-source"]
+wgpu-runtime = ["dep:gpui_wgpu"]
 
 [dependencies]
 anyhow = "1"
 gpui = { package = "gpui-box", path = "../../vendor/gpui-box/crates/gpui" }
-gpui_wgpu = { package = "gpui-box-wgpu", path = "../..", features = ["host"] }
+gpui_wgpu = { package = "gpui-box-wgpu", path = "../..", features = ["host"], optional = true }
 sdl3-sys = "=0.6.8"
 
 [dev-dependencies]

@@ -14,13 +14,14 @@ use crate::{
 
 const MIN_THREADS: usize = 2;
 
-/// A multithreaded [`PlatformDispatcher`] for tests and benchmarks.
+/// A host-driven multithreaded [`PlatformDispatcher`].
 ///
 /// Background tasks run in parallel on a pool of worker threads and timers fire
 /// in real time on a dedicated timer thread, mirroring the production
 /// dispatchers (see `LinuxDispatcher`). Main-thread tasks are queued until the
 /// creating thread drains them via [`Self::run_until_idle`], since there is no
-/// platform run loop pumping them.
+/// platform run loop pumping them. Embedded hosts drive that queue through
+/// [`Self::run_ready_main_tasks`].
 ///
 /// Unlike [`TestDispatcher`](crate::TestDispatcher), which runs everything on a
 /// single thread with a virtual clock, work dispatched through this dispatcher

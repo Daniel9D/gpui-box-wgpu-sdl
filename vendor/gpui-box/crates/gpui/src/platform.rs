@@ -10,7 +10,6 @@ pub mod layer_shell;
 /// Types for configuring parent-anchored popup windows such as menus, dropdowns and tooltips.
 pub mod popup;
 
-#[cfg(any(test, feature = "test-support"))]
 mod threaded_dispatcher;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -103,7 +102,6 @@ pub(crate) use test::*;
 #[cfg(any(test, feature = "test-support"))]
 pub use test::{TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream};
 
-#[cfg(any(test, feature = "test-support"))]
 pub use threaded_dispatcher::ThreadedDispatcher;
 
 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
@@ -1131,9 +1129,6 @@ pub trait PlatformDispatcher: Send + Sync {
         None
     }
 
-    // This cfg must match the `threaded_dispatcher` module's, which implements
-    // this method whenever it compiles.
-    #[cfg(any(test, feature = "test-support"))]
     fn as_threaded(&self) -> Option<&ThreadedDispatcher> {
         None
     }

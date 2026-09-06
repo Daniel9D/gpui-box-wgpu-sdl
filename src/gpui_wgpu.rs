@@ -7,6 +7,8 @@ mod wgpu_context;
 mod wgpu_host;
 mod wgpu_image;
 mod wgpu_renderer;
+#[cfg(all(not(target_family = "wasm"), feature = "host"))]
+mod wgpu_runtime;
 
 pub use cosmic_text_system::*;
 pub use gpui;
@@ -21,6 +23,8 @@ pub use wgpu_image::*;
 #[cfg(not(target_family = "wasm"))]
 pub use wgpu_renderer::WgpuHeadlessRenderer;
 pub use wgpu_renderer::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
+#[cfg(all(not(target_family = "wasm"), feature = "host"))]
+pub use wgpu_runtime::*;
 
 /// Serialises the tests in this crate that stand up a GPU device.
 ///
