@@ -5,8 +5,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, DevicePixels, Edges, Hsla,
-    Pixels, Point, Radians, Rgba, ScaledPixels, Size, bounds_tree::BoundsTree, point, white,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, DevicePixels, Edges,
+    ExternalImageHandle, ExternalImageId, Hsla, Pixels, Point, Radians, Rgba, ScaledPixels, Size,
+    bounds_tree::BoundsTree, point, white,
 };
 use std::{
     fmt::Debug,
@@ -49,6 +50,7 @@ pub struct Scene {
     pub monochrome_sprites: Vec<MonochromeSprite>,
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
+    pub external_images: Vec<PaintExternalImage>,
     pub surfaces: Vec<PaintSurface>,
     /// Glass surfaces — deliberately outside the primitive batch stream so
     /// renderers can snapshot the framebuffer at each surface's order.
@@ -68,6 +70,7 @@ impl Scene {
         self.monochrome_sprites.clear();
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
+        self.external_images.clear();
         self.surfaces.clear();
         self.backdrop_glass.clear();
     }
@@ -89,6 +92,7 @@ impl Scene {
             && self.monochrome_sprites.is_empty()
             && self.subpixel_sprites.is_empty()
             && self.polychrome_sprites.is_empty()
+            && self.external_images.is_empty()
             && self.surfaces.is_empty()
             && self.backdrop_glass.is_empty()
     }
@@ -201,6 +205,10 @@ impl Scene {
                 sprite.order = order;
                 self.polychrome_sprites.push(*sprite);
             }
+            Primitive::ExternalImage(image) => {
+                image.sprite.order = order;
+                self.external_images.push(image.clone());
+            }
             Primitive::Surface(surface) => {
                 surface.order = order;
                 self.surfaces.push(surface.clone());
@@ -234,6 +242,9 @@ impl Scene {
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.polychrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.blend_mode, sprite.tile.tile_id));
+        // Unlike atlas sprites, external images cannot be regrouped by texture:
+        // equal-order images may overlap, so their insertion order is semantic.
+        self.external_images.sort_by_key(|image| image.sprite.order);
         self.surfaces.sort_by_key(|surface| surface.order);
         self.backdrop_glass.sort_by_key(|glass| glass.order);
     }
@@ -261,6 +272,8 @@ impl Scene {
             subpixel_sprites_iter: self.subpixel_sprites.iter().peekable(),
             polychrome_sprites_start: 0,
             polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
+            external_images_start: 0,
+            external_images_iter: self.external_images.iter().peekable(),
             surfaces_start: 0,
             surfaces_iter: self.surfaces.iter().peekable(),
             backdrop_glass_iter: self.backdrop_glass.iter().peekable(),
@@ -1132,6 +1145,7 @@ pub(crate) enum PrimitiveKind {
     MonochromeSprite,
     SubpixelSprite,
     PolychromeSprite,
+    ExternalImage,
     Surface,
 }
 
@@ -1155,6 +1169,7 @@ pub enum Primitive {
     MonochromeSprite(MonochromeSprite),
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
+    ExternalImage(PaintExternalImage),
     Surface(PaintSurface),
 }
 
@@ -1169,6 +1184,7 @@ impl Primitive {
             Primitive::MonochromeSprite(sprite) => &sprite.bounds,
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
+            Primitive::ExternalImage(image) => &image.sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
         }
     }
@@ -1182,6 +1198,7 @@ impl Primitive {
             Primitive::MonochromeSprite(sprite) => &sprite.content_mask,
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
+            Primitive::ExternalImage(image) => &image.sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
         }
     }
@@ -1189,6 +1206,7 @@ impl Primitive {
     fn cull_bounds(&self) -> Bounds<ScaledPixels> {
         match self {
             Primitive::PolychromeSprite(sprite) => sprite.transformed_bounds(),
+            Primitive::ExternalImage(image) => image.sprite.transformed_bounds(),
             _ => *self.bounds(),
         }
     }
@@ -1216,6 +1234,8 @@ struct BatchIterator<'a> {
     subpixel_sprites_iter: Peekable<slice::Iter<'a, SubpixelSprite>>,
     polychrome_sprites_start: usize,
     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
+    external_images_start: usize,
+    external_images_iter: Peekable<slice::Iter<'a, PaintExternalImage>>,
     surfaces_start: usize,
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
     backdrop_glass_iter: Peekable<slice::Iter<'a, BackdropGlass>>,
@@ -1247,6 +1267,12 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.polychrome_sprites_iter.peek().map(|s| s.order),
                 PrimitiveKind::PolychromeSprite,
+            ),
+            (
+                self.external_images_iter
+                    .peek()
+                    .map(|image| image.sprite.order),
+                PrimitiveKind::ExternalImage,
             ),
             (
                 self.surfaces_iter.peek().map(|s| s.order),
@@ -1424,6 +1450,35 @@ impl<'a> Iterator for BatchIterator<'a> {
                     range: sprites_start..sprites_end,
                 })
             }
+            PrimitiveKind::ExternalImage => {
+                let first = self
+                    .external_images_iter
+                    .peek()
+                    .expect("required framework invariant must hold");
+                let image_id = first.image.id();
+                let blend_mode = first.sprite.blend_mode;
+                let images_start = self.external_images_start;
+                let mut images_end = images_start + 1;
+                self.external_images_iter.next();
+                while self
+                    .external_images_iter
+                    .next_if(|image| {
+                        image.sprite.order < next_glass_order
+                            && (image.sprite.order, batch_kind) < max_order_and_kind
+                            && image.image.id() == image_id
+                            && image.sprite.blend_mode == blend_mode
+                    })
+                    .is_some()
+                {
+                    images_end += 1;
+                }
+                self.external_images_start = images_end;
+                Some(PrimitiveBatch::ExternalImages {
+                    image_id,
+                    blend_mode,
+                    range: images_start..images_end,
+                })
+            }
             PrimitiveKind::Surface => {
                 let surfaces_start = self.surfaces_start;
                 let mut surfaces_end = surfaces_start + 1;
@@ -1473,6 +1528,11 @@ pub enum PrimitiveBatch {
         blend_mode: SpriteBlendMode,
         range: Range<usize>,
     },
+    ExternalImages {
+        image_id: ExternalImageId,
+        blend_mode: SpriteBlendMode,
+        range: Range<usize>,
+    },
     Surfaces(Range<usize>),
 }
 
@@ -1509,6 +1569,14 @@ impl PrimitiveBatch {
                     texture_id.index
                 )
             }
+            Self::ExternalImages {
+                image_id,
+                blend_mode,
+                range,
+            } => format!(
+                "external images ({}, {blend_mode:?}) for {image_id:?}",
+                range.len()
+            ),
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
         }
     }
@@ -2594,6 +2662,21 @@ impl PolychromeSprite {
 impl From<PolychromeSprite> for Primitive {
     fn from(sprite: PolychromeSprite) -> Self {
         Primitive::PolychromeSprite(sprite)
+    }
+}
+
+/// A sprite whose texture is supplied directly by the active renderer.
+#[derive(Clone, Debug)]
+pub struct PaintExternalImage {
+    /// Backend-neutral image and renderer payload.
+    pub image: std::sync::Arc<ExternalImageHandle>,
+    /// Geometry and compositing parameters shared with polychrome sprites.
+    pub sprite: PolychromeSprite,
+}
+
+impl From<PaintExternalImage> for Primitive {
+    fn from(image: PaintExternalImage) -> Self {
+        Primitive::ExternalImage(image)
     }
 }
 

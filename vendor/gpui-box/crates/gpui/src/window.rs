@@ -4,15 +4,16 @@ use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecogni
 use crate::interactive::TouchEvent;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropGlass, Background, BorderStyle, Bounds,
-    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, DocumentSelectionState, Edges,
-    Effect, Entity, EntityId, EventEmitter, ExternalDropEvent, FileDropEvent, FontId, GlassLobe,
-    GlassMaterial, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
-    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
-    LineLayoutIndex, MAX_GLASS_LOBES, Modifiers, ModifiersChangedEvent, MonochromeSprite,
-    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, ParticleEmitter, Path, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformViewHandle,
+    AsyncWindowContext, AtlasTextureId, AtlasTextureKind, AtlasTile, AvailableSpace, BackdropGlass,
+    Background, BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode,
+    CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree,
+    DisplayId, DocumentSelectionState, Edges, Effect, Entity, EntityId, EventEmitter,
+    ExternalDropEvent, ExternalImageHandle, FileDropEvent, FontId, GlassLobe, GlassMaterial,
+    Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext,
+    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, MAX_GLASS_LOBES,
+    Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent,
+    MouseUpEvent, PaintExternalImage, ParticleEmitter, Path, Pixels, PlatformAtlas,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformViewHandle,
     PlatformViewPlacement, PlatformViewRegistry, PlatformWindow, Point, PolychromeSprite, Priority,
     PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams,
     RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X,
@@ -20,7 +21,7 @@ use crate::{
     SelectionScopeId, Shadow, SharedString, Size, SpriteColorMode, SpriteInstance,
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
+    TextStyleRefinement, ThermalState, TileId, TransformationMatrix, Underline, UnderlineStyle,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
     WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, profiler, px, rems, size,
     transparent_black,
@@ -1529,6 +1530,52 @@ fn validate_image_source(
         frame_size.height.0
     );
     Ok(())
+}
+
+fn visible_image_region(
+    bounds: Bounds<Pixels>,
+    image_bounds: Bounds<Pixels>,
+    image_size: Size<DevicePixels>,
+) -> Option<(Bounds<Pixels>, Bounds<DevicePixels>)> {
+    let visible_bounds = bounds.intersect(&image_bounds);
+    if visible_bounds.size.width <= Pixels::ZERO
+        || visible_bounds.size.height <= Pixels::ZERO
+        || image_bounds.size.width <= Pixels::ZERO
+        || image_bounds.size.height <= Pixels::ZERO
+    {
+        return None;
+    }
+    if visible_bounds == image_bounds {
+        return Some((
+            visible_bounds,
+            Bounds {
+                origin: Point::default(),
+                size: image_size,
+            },
+        ));
+    }
+
+    let x_offset = (visible_bounds.origin.x - image_bounds.origin.x) / image_bounds.size.width;
+    let y_offset = (visible_bounds.origin.y - image_bounds.origin.y) / image_bounds.size.height;
+    let width = visible_bounds.size.width / image_bounds.size.width;
+    let height = visible_bounds.size.height / image_bounds.size.height;
+    let source_x = (x_offset * image_size.width.0 as f32).round() as i32;
+    let source_y = (y_offset * image_size.height.0 as f32).round() as i32;
+    let source_width = (width * image_size.width.0 as f32).round() as i32;
+    let source_height = (height * image_size.height.0 as f32).round() as i32;
+    let source_x = source_x.clamp(0, image_size.width.0);
+    let source_y = source_y.clamp(0, image_size.height.0);
+
+    Some((
+        visible_bounds,
+        Bounds {
+            origin: point(DevicePixels(source_x), DevicePixels(source_y)),
+            size: size(
+                DevicePixels(source_width.min(image_size.width.0 - source_x).max(0)),
+                DevicePixels(source_height.min(image_size.height.0 - source_y).max(0)),
+            ),
+        },
+    ))
 }
 
 impl Window {
@@ -5709,6 +5756,61 @@ impl Window {
         Ok(())
     }
 
+    /// Paints a renderer-owned image directly into the scene.
+    pub fn paint_external_image(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        image_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        image: Arc<ExternalImageHandle>,
+        grayscale: bool,
+    ) {
+        self.invalidator.debug_assert_paint();
+
+        let image_size = image.size();
+        let Some((visible_bounds, source)) = visible_image_region(bounds, image_bounds, image_size)
+        else {
+            return;
+        };
+        let opacity = self.element_opacity_for_bounds(&bounds);
+        if opacity <= 0.0 {
+            return;
+        }
+
+        self.next_frame.scene.insert_primitive(PaintExternalImage {
+            image,
+            sprite: PolychromeSprite {
+                order: 0,
+                blend_mode: crate::SpriteBlendMode::Normal,
+                color_mode: if grayscale {
+                    SpriteColorMode::Grayscale
+                } else {
+                    SpriteColorMode::Color
+                },
+                sample_inset: (source.origin != Point::default() || source.size != image_size)
+                    .into(),
+                bounds: self.snap_bounds(visible_bounds),
+                content_mask: self.snapped_content_mask(),
+                corner_radii: corner_radii
+                    .clamp_radii_for_quad_size(visible_bounds.size)
+                    .scale(self.scale_factor()),
+                tile: AtlasTile {
+                    texture_id: AtlasTextureId {
+                        index: 0,
+                        kind: AtlasTextureKind::Polychrome,
+                    },
+                    tile_id: TileId(0),
+                    padding: 0,
+                    bounds: source,
+                },
+                transformation: TransformationMatrix::unit(),
+                tint: crate::white(),
+                opacity,
+                pad: 0,
+            },
+        });
+    }
+
     /// Paint an image into the scene for the next frame at the current z-index.
     /// This method will panic if the frame_index is not valid.
     ///
@@ -5732,47 +5834,10 @@ impl Window {
             frame_index < data.frame_count(),
             "It's the caller's job to pass a valid frame index"
         );
-        let visible_bounds = bounds.intersect(&image_bounds);
-        if visible_bounds.size.width <= Pixels::ZERO || visible_bounds.size.height <= Pixels::ZERO {
-            return Ok(());
-        }
-        if image_bounds.size.width <= Pixels::ZERO || image_bounds.size.height <= Pixels::ZERO {
-            return Ok(());
-        }
-
         let frame_size = data.size(frame_index);
-        let source = if visible_bounds == image_bounds {
-            Bounds {
-                origin: Point::default(),
-                size: frame_size,
-            }
-        } else {
-            let x_offset_ratio =
-                (visible_bounds.origin.x - image_bounds.origin.x) / image_bounds.size.width;
-            let y_offset_ratio =
-                (visible_bounds.origin.y - image_bounds.origin.y) / image_bounds.size.height;
-            let width_ratio = visible_bounds.size.width / image_bounds.size.width;
-            let height_ratio = visible_bounds.size.height / image_bounds.size.height;
-
-            let sub_origin_x = (x_offset_ratio * frame_size.width.0 as f32).round() as i32;
-            let sub_origin_y = (y_offset_ratio * frame_size.height.0 as f32).round() as i32;
-            let sub_width = (width_ratio * frame_size.width.0 as f32).round() as i32;
-            let sub_height = (height_ratio * frame_size.height.0 as f32).round() as i32;
-
-            let clamped_origin_x = sub_origin_x.clamp(0, frame_size.width.0);
-            let clamped_origin_y = sub_origin_y.clamp(0, frame_size.height.0);
-            let clamped_width = sub_width.min(frame_size.width.0 - clamped_origin_x).max(0);
-            let clamped_height = sub_height
-                .min(frame_size.height.0 - clamped_origin_y)
-                .max(0);
-
-            Bounds {
-                origin: point(
-                    DevicePixels(clamped_origin_x),
-                    DevicePixels(clamped_origin_y),
-                ),
-                size: size(DevicePixels(clamped_width), DevicePixels(clamped_height)),
-            }
+        let Some((visible_bounds, source)) = visible_image_region(bounds, image_bounds, frame_size)
+        else {
+            return Ok(());
         };
 
         let corner_radii = corner_radii.clamp_radii_for_quad_size(visible_bounds.size);

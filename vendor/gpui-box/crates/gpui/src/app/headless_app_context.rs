@@ -44,6 +44,7 @@ pub struct HeadlessAppContext {
     pub foreground_executor: ForegroundExecutor,
     dispatcher: TestDispatcher,
     text_system: Arc<TextSystem>,
+    platform: Rc<TestPlatform>,
 }
 
 impl HeadlessAppContext {
@@ -88,7 +89,7 @@ impl HeadlessAppContext {
 
         let text_system = Arc::new(TextSystem::new(platform_text_system));
         let http_client = http_client::FakeHttpClient::with_404_response();
-        let app = App::new_app(platform, asset_source, http_client);
+        let app = App::new_app(platform.clone(), asset_source, http_client);
         app.borrow_mut().mode = GpuiMode::test();
 
         Self {
@@ -97,6 +98,7 @@ impl HeadlessAppContext {
             foreground_executor,
             dispatcher,
             text_system,
+            platform,
         }
     }
 
@@ -183,6 +185,26 @@ impl HeadlessAppContext {
     /// Returns the foreground executor.
     pub fn foreground_executor(&self) -> &ForegroundExecutor {
         &self.foreground_executor
+    }
+
+    /// Returns the cursor style requested at the window's current pointer position.
+    pub fn cursor_style(&mut self, handle: AnyWindowHandle) -> Result<crate::CursorStyle> {
+        self.update_window(handle, |_, window, _| {
+            window
+                .rendered_frame
+                .cursor_style(window)
+                .unwrap_or_default()
+        })
+    }
+
+    /// Restores cursor visibility after host pointer motion.
+    pub fn show_cursor(&self) {
+        self.platform.show_cursor();
+    }
+
+    /// Returns whether GPUI currently wants the host cursor visible.
+    pub fn is_cursor_visible(&self) -> bool {
+        crate::Platform::is_cursor_visible(self.platform.as_ref())
     }
 }
 
