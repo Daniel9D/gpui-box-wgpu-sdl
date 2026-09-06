@@ -1,6 +1,6 @@
 # GPUI Box wgpu
 
-A standalone renderer extracted from `rust-engine`'s GPUI Box fork. Reuse your
+A GPUI Box fork. Reuse your
 wgpu device and queue, render GPUI into your texture, and keep window creation,
 swapchain management, presentation, and native events in your application.
 Requires Rust 1.97+ and wgpu 30.0.1.
@@ -27,13 +27,13 @@ gpui_wgpu = { package = "gpui-box-wgpu", git = "https://YOUR_HOST/YOUR_OWNER/gpu
 
 The package supports path and Git dependencies; crates.io publication is disabled.
 
-| Feature | Behavior |
-| --- | --- |
-| default (empty) | Renderer, text system, native external-device rendering |
-| `host` | Native `WgpuHost`, GPUI headless context, image capture APIs |
-| `test-support` | Compatibility alias enabling `host` |
-| `kit` | `host` plus `gpui-box-kit` components with optional heavy features disabled |
-| `font-kit` | System font discovery |
+| Feature         | Behavior                                                                    |
+| --------------- | --------------------------------------------------------------------------- |
+| default (empty) | Renderer, text system, native external-device rendering                     |
+| `host`          | Native `WgpuHost`, GPUI headless context, image capture APIs                |
+| `test-support`  | Compatibility alias enabling `host`                                         |
+| `kit`           | `host` plus `gpui-box-kit` components with optional heavy features disabled |
+| `font-kit`      | System font discovery                                                       |
 
 `host` enables `gpui/test-support` and the direct optional `image` dependency
 because the pinned GPUI headless APIs require them. Default production builds
@@ -177,18 +177,18 @@ and presentation. For an embedded viewport:
 gpui_position = (native_position - viewport_origin) / viewport_scale
 ```
 
-| SDL category | GPUI destination | Required state |
-| --- | --- | --- |
-| mouse motion | `MouseMoveEvent` | logical position, pressed button, modifiers |
-| mouse down/up | `MouseDownEvent` / `MouseUpEvent` | position, button, click count, modifiers |
-| wheel | `ScrollWheelEvent` | pointer position, pixel/line delta, phase |
-| key down/up | `KeyDownEvent` / `KeyUpEvent` | normalized key, character, repeat, modifiers |
-| modifiers | `ModifiersChangedEvent` | Ctrl, Alt, Shift, platform, function, Caps Lock |
-| committed text | `WgpuHost::dispatch_text` | UTF-8 text from `SDL_EVENT_TEXT_INPUT` |
-| composition | `SdlHostEvent::TextEditing` | marked range and `SDL_EVENT_TEXT_EDITING` data |
-| resize/HiDPI | `render_to_view` | physical extent and positive scale factor |
-| focus | `SdlHostEvent::FocusChanged` | loss also clears retained input state |
-| cursor/clipboard | future bidirectional adapter | GPUI platform requests and SDL responses |
+| SDL category     | GPUI destination                  | Required state                                  |
+| ---------------- | --------------------------------- | ----------------------------------------------- |
+| mouse motion     | `MouseMoveEvent`                  | logical position, pressed button, modifiers     |
+| mouse down/up    | `MouseDownEvent` / `MouseUpEvent` | position, button, click count, modifiers        |
+| wheel            | `ScrollWheelEvent`                | pointer position, pixel/line delta, phase       |
+| key down/up      | `KeyDownEvent` / `KeyUpEvent`     | normalized key, character, repeat, modifiers    |
+| modifiers        | `ModifiersChangedEvent`           | Ctrl, Alt, Shift, platform, function, Caps Lock |
+| committed text   | `WgpuHost::dispatch_text`         | UTF-8 text from `SDL_EVENT_TEXT_INPUT`          |
+| composition      | `SdlHostEvent::TextEditing`       | marked range and `SDL_EVENT_TEXT_EDITING` data  |
+| resize/HiDPI     | `render_to_view`                  | physical extent and positive scale factor       |
+| focus            | `SdlHostEvent::FocusChanged`      | loss also clears retained input state           |
+| cursor/clipboard | future bidirectional adapter      | GPUI platform requests and SDL responses        |
 
 See the adapter README for `path`/Git dependencies, the raw-event safety
 contract, and a complete routing example.
