@@ -22,8 +22,11 @@ struct Params {
     transmission_gain: f32,
     hairline: f32,
     lobe_count: u32,
-    pad_0: u32,
+    blur_radius: u32,
     optical_lift: vec4<f32>,
+    edge_mask_edge: f32,
+    edge_mask_band: f32,
+    _mask_pad: vec2<f32>,
     lobes: array<Lobe, MAX_GLASS_LOBES>,
 }
 
@@ -31,6 +34,7 @@ struct Params {
 @group(0) @binding(1) var sharp_source: texture_2d<f32>;
 @group(0) @binding(2) var source_sampler: sampler;
 @group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(4) var blur_weights: texture_2d<f32>;
 
 struct Varying {
     @builtin(position) position: vec4<f32>,
@@ -46,19 +50,21 @@ fn vs_fullscreen(@builtin(vertex_index) vertex: u32) -> Varying {
     );
 }
 
-fn gaussian(x: f32, sigma: f32) -> f32 {
-    return exp(-0.5 * x * x / (sigma * sigma));
+@fragment
+fn fs_blur_weight(input: Varying) -> @location(0) f32 {
+    let offset = f32(u32(input.position.x));
+    let sigma = max(params.sigma, 1.0);
+    return exp(-0.5 * offset * offset / (sigma * sigma));
 }
 
 @fragment
 fn fs_blur(input: Varying) -> @location(0) vec4<f32> {
-    let sigma = max(params.sigma, 1.0);
-    let radius = min(64, i32(ceil(sigma * 3.0)));
-    var color = textureSample(source, source_sampler, input.uv) * gaussian(0.0, sigma);
-    var weight = gaussian(0.0, sigma);
+    let radius = min(64u, params.blur_radius);
+    var color = textureSample(source, source_sampler, input.uv) * textureLoad(blur_weights, vec2(0, 0), 0).x;
+    var weight = textureLoad(blur_weights, vec2(0, 0), 0).x;
     for (var offset = 1; offset <= 64; offset++) {
-        if (offset <= radius) {
-            let sample_weight = gaussian(f32(offset), sigma);
+        if (u32(offset) <= radius) {
+            let sample_weight = textureLoad(blur_weights, vec2(offset, 0), 0).x;
             let delta = params.direction * f32(offset) / params.viewport;
             color += (textureSample(source, source_sampler, input.uv + delta) +
                 textureSample(source, source_sampler, input.uv - delta)) * sample_weight;
@@ -97,6 +103,32 @@ fn smooth_min(a: f32, b: f32, smoothing: f32) -> f32 {
 // Distance to the surface's shape. Mirrors `glass_sdf` in the Metal shaders
 // and the `union` helper inside `glass_field` in scene.rs: no lobes means the
 // surface is the single rounded rect it already named.
+// Linear fade from a named edge. Mirrors `glass_edge_mask` in scene.rs.
+fn glass_edge_mask(point: vec2<f32>) -> f32 {
+    if (params.edge_mask_edge <= 0.0 || params.edge_mask_band <= 0.0) {
+        return 1.0;
+    }
+    if (params.edge_mask_edge < 1.5) {
+        return 1.0 - clamp((point.y - params.bounds.y) / params.edge_mask_band, 0.0, 1.0);
+    }
+    if (params.edge_mask_edge < 2.5) {
+        return 1.0 - clamp((params.bounds.y + params.bounds.w - point.y) / params.edge_mask_band, 0.0, 1.0);
+    }
+    if (params.edge_mask_edge < 3.5) {
+        return 1.0 - clamp((point.x - params.bounds.x) / params.edge_mask_band, 0.0, 1.0);
+    }
+    return 1.0 - clamp((params.bounds.x + params.bounds.z - point.x) / params.edge_mask_band, 0.0, 1.0);
+}
+
+fn apply_edge_mask(color: vec4<f32>, point: vec2<f32>) -> vec4<f32> {
+    let mask = glass_edge_mask(point);
+    if (mask >= 1.0) {
+        return color;
+    }
+    let original = textureLoad(sharp_source, vec2<i32>(point), 0);
+    return mix(original, color, mask);
+}
+
 fn glass_distance(point: vec2<f32>) -> f32 {
     if (params.lobe_count == 0u) {
         return rounded_distance(point);
@@ -130,7 +162,7 @@ fn fs_composite(input: Varying) -> @location(0) vec4<f32> {
     if ((params.bevel <= 0.0 || params.refraction == 0.0) && params.specular <= 0.0 &&
         params.transmission_gain == 1.0 && params.optical_lift.a <= 0.0 &&
         params.hairline <= 0.0) {
-        return textureLoad(source, vec2<i32>(point), 0);
+        return apply_edge_mask(textureLoad(source, vec2<i32>(point), 0), point);
     }
 
     // The gradient by central differences, on the same half-pixel stencil as
@@ -207,7 +239,10 @@ fn fs_composite(input: Varying) -> @location(0) vec4<f32> {
         color = vec4<f32>(color.rgb + hair * (1.0 - 0.18 * facing_up) * 0.18, color.a);
     }
 
-    return vec4<f32>(clamp(color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
+    return apply_edge_mask(
+        vec4<f32>(clamp(color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), color.a),
+        point,
+    );
 }
 
 @fragment

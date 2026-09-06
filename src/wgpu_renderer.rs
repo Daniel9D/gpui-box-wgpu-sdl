@@ -18,15 +18,17 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 const MAX_INSTANCE_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
-// Backdrop glass first preserves one sharp snapshot, then uses two full-frame
-// render passes per variance-splitting iteration and one composite pass. How
-// many iterations one radius needs is `BackdropGlass::gaussian_pass_count`,
+// Backdrop glass precomputes one 65-pixel Gaussian weight LUT, preserves one
+// sharp snapshot, then uses two clipped render passes per variance-splitting
+// iteration and one composite pass. How many iterations one radius needs is
+// `BackdropGlass::gaussian_pass_count`,
 // which this renderer shares with DirectX. Only those Gaussian passes are
 // bounded: the sharp snapshot and composite are the material's correctness
 // floor and may not disappear because earlier surfaces spent the scattering
 // budget. Sized so all [`gpui::MAX_LUMINANCE_PROBES`] surfaces can take the
 // themes' standard blur at 2x scale with room to spare.
 const MAX_BACKDROP_GLASS_GAUSSIAN_RENDER_PASSES_PER_FRAME: usize = 256;
+const BACKDROP_BLUR_WEIGHT_COUNT: u32 = 65;
 
 const INSTANCE_TEXTURE_TEXEL_SIZE: u64 = 16;
 
@@ -206,6 +208,7 @@ struct WgpuPipelines {
     poly_sprites_screen: wgpu::RenderPipeline,
     #[allow(dead_code)]
     surfaces: wgpu::RenderPipeline,
+    backdrop_blur_weights: wgpu::RenderPipeline,
     backdrop_blur: wgpu::RenderPipeline,
     backdrop_composite: wgpu::RenderPipeline,
     backdrop_copy: wgpu::RenderPipeline,
@@ -237,6 +240,7 @@ struct WgpuBindGroupLayouts {
     instances: wgpu::BindGroupLayout,
     texture: wgpu::BindGroupLayout,
     surfaces: wgpu::BindGroupLayout,
+    backdrop_blur_weights: wgpu::BindGroupLayout,
     backdrop: wgpu::BindGroupLayout,
 }
 
@@ -273,13 +277,26 @@ struct BackdropParams {
     /// How many entries of `lobes` are real; 0 means the surface is the single
     /// rounded rect named by `bounds` and `radii`.
     lobe_count: u32,
-    pad: u32,
+    blur_radius: u32,
     optical_lift: [f32; 4],
+    edge_mask_edge: f32,
+    edge_mask_band: f32,
+    _mask_pad: [f32; 2],
     lobes: [BackdropLobe; MAX_GLASS_LOBES],
 }
 
-struct BackdropPassResources {
-    _bind_group: wgpu::BindGroup,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackdropTextureRole {
+    Scene,
+    Sharp,
+    Horizontal,
+    Vertical,
+}
+
+struct CachedBackdropBindGroup {
+    source: BackdropTextureRole,
+    sharp: BackdropTextureRole,
+    bind_group: wgpu::BindGroup,
 }
 
 struct BackdropTextures {
@@ -291,6 +308,8 @@ struct BackdropTextures {
     sharp_view: wgpu::TextureView,
     _horizontal: wgpu::Texture,
     horizontal_view: wgpu::TextureView,
+    _blur_weights: wgpu::Texture,
+    blur_weights_view: wgpu::TextureView,
     /// Kept nameable rather than view-only: the luminance probe copies its
     /// sample texels out of the blurred result this texture holds when frost
     /// is requested.
@@ -351,6 +370,11 @@ struct WgpuResources {
     path_msaa_view: Option<wgpu::TextureView>,
     backdrop_textures: Option<BackdropTextures>,
     backdrop_params_buffers: Vec<wgpu::Buffer>,
+    /// One Gaussian-LUT bind group per parameter-buffer slot.
+    backdrop_blur_weight_bind_groups: RefCell<Vec<Option<wgpu::BindGroup>>>,
+    /// One bind group per parameter-buffer slot. Stable scene topology reuses
+    /// it across frames; a role change replaces only that slot.
+    backdrop_bind_groups: RefCell<Vec<Option<CachedBackdropBindGroup>>>,
 }
 
 impl WgpuResources {
@@ -360,6 +384,8 @@ impl WgpuResources {
         self.path_msaa_texture = None;
         self.path_msaa_view = None;
         self.backdrop_textures = None;
+        self.backdrop_blur_weight_bind_groups.borrow_mut().clear();
+        self.backdrop_bind_groups.borrow_mut().clear();
     }
 }
 
@@ -876,6 +902,8 @@ impl WgpuRenderer {
             path_msaa_view: None,
             backdrop_textures: None,
             backdrop_params_buffers: Vec::new(),
+            backdrop_blur_weight_bind_groups: RefCell::new(Vec::new()),
+            backdrop_bind_groups: RefCell::new(Vec::new()),
         };
 
         Ok(Self {
@@ -1073,14 +1101,41 @@ impl WgpuRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
+        let backdrop_blur_weights =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("backdrop_blur_weights_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(
+                            std::mem::size_of::<BackdropParams>() as u64
+                        ),
+                    },
+                    count: None,
+                }],
+            });
 
         WgpuBindGroupLayouts {
             globals,
             instances,
             texture,
             surfaces,
+            backdrop_blur_weights,
             backdrop,
         }
     }
@@ -1487,6 +1542,38 @@ impl WgpuRenderer {
         let backdrop_blur = create_backdrop_pipeline("backdrop_blur", "fs_blur");
         let backdrop_composite = create_backdrop_pipeline("backdrop_composite", "fs_composite");
         let backdrop_copy = create_backdrop_pipeline("backdrop_copy", "fs_copy");
+        let backdrop_blur_weights = {
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("backdrop_blur_weights_pipeline_layout"),
+                bind_group_layouts: &[Some(&layouts.backdrop_blur_weights)],
+                immediate_size: 0,
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("backdrop_blur_weights"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &backdrop_shader,
+                    entry_point: Some("vs_fullscreen"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &backdrop_shader,
+                    entry_point: Some("fs_blur_weight"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::R32Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::RED,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
 
         WgpuPipelines {
             quads,
@@ -1500,6 +1587,7 @@ impl WgpuRenderer {
             poly_sprites_additive,
             poly_sprites_screen,
             surfaces,
+            backdrop_blur_weights,
             backdrop_blur,
             backdrop_composite,
             backdrop_copy,
@@ -1684,6 +1772,23 @@ impl WgpuRenderer {
             let (sharp, sharp_view) = create_texture("backdrop_sharp");
             let (horizontal, horizontal_view) = create_texture("backdrop_horizontal");
             let (vertical, vertical_view) = create_texture("backdrop_vertical");
+            let blur_weights = resources.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("backdrop_blur_weights"),
+                size: wgpu::Extent3d {
+                    width: BACKDROP_BLUR_WEIGHT_COUNT,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let blur_weights_view =
+                blur_weights.create_view(&wgpu::TextureViewDescriptor::default());
             resources.backdrop_textures = Some(BackdropTextures {
                 _scene: scene,
                 scene_view,
@@ -1691,6 +1796,8 @@ impl WgpuRenderer {
                 sharp_view,
                 _horizontal: horizontal,
                 horizontal_view,
+                _blur_weights: blur_weights,
+                blur_weights_view,
                 vertical,
                 vertical_view,
                 width,
@@ -1906,8 +2013,20 @@ impl WgpuRenderer {
         scene: &Scene,
         size: Size<DevicePixels>,
     ) -> anyhow::Result<wgpu::Texture> {
-        self.prepare_headless_frame(size)?;
+        if size.width.0 <= 0 || size.height.0 <= 0 {
+            anyhow::bail!("Invalid size for headless rendering: {:?}", size);
+        }
+        if size.width.0 as u32 > self.max_texture_size
+            || size.height.0 as u32 > self.max_texture_size
+        {
+            anyhow::bail!(
+                "Headless render size {:?} exceeds maximum texture dimension {}",
+                size,
+                self.max_texture_size
+            );
+        }
 
+        self.update_drawable_size(size);
         let resources = self.resources();
         let texture = resources.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("headless_render_target"),
@@ -2185,7 +2304,6 @@ impl WgpuRenderer {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("main_encoder"),
                 });
-        let mut backdrop_pass_resources = Vec::new();
         let backdrop_textures = if required_backdrop_passes == 0 {
             None
         } else {
@@ -2195,12 +2313,13 @@ impl WgpuRenderer {
                     textures.horizontal_view.clone(),
                     textures.vertical_view.clone(),
                     textures.sharp_view.clone(),
+                    textures.blur_weights_view.clone(),
                 )
             })
         };
         let render_view = backdrop_textures
             .as_ref()
-            .map(|(scene, _, _, _)| scene)
+            .map(|(scene, _, _, _, _)| scene)
             .unwrap_or(target_view);
         let params_buffers = self
             .resources()
@@ -2208,7 +2327,7 @@ impl WgpuRenderer {
             .get(..required_backdrop_passes)
             .context("insufficient backdrop parameter buffers")?
             .to_vec();
-        let mut params_buffers = params_buffers.iter();
+        let mut params_buffers = params_buffers.iter().enumerate();
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2241,7 +2360,6 @@ impl WgpuRenderer {
                     drop(pass);
                     self.draw_backdrop_glass(
                         &mut encoder,
-                        &mut backdrop_pass_resources,
                         &mut params_buffers,
                         glass,
                         pass_count,
@@ -2258,6 +2376,10 @@ impl WgpuRenderer {
                             .as_ref()
                             .context("backdrop textures unavailable")?
                             .3,
+                        &backdrop_textures
+                            .as_ref()
+                            .context("backdrop textures unavailable")?
+                            .4,
                     )?;
                     self.encode_probe_copy(
                         &mut encoder,
@@ -2395,7 +2517,6 @@ impl WgpuRenderer {
                 drop(pass);
                 self.draw_backdrop_glass(
                     &mut encoder,
-                    &mut backdrop_pass_resources,
                     &mut params_buffers,
                     glass,
                     pass_count,
@@ -2412,6 +2533,10 @@ impl WgpuRenderer {
                         .as_ref()
                         .context("backdrop textures unavailable")?
                         .3,
+                    &backdrop_textures
+                        .as_ref()
+                        .context("backdrop textures unavailable")?
+                        .4,
                 )?;
                 self.encode_probe_copy(
                     &mut encoder,
@@ -2427,11 +2552,16 @@ impl WgpuRenderer {
         if backdrop_textures.is_some() {
             self.draw_backdrop_pass(
                 &mut encoder,
-                &mut backdrop_pass_resources,
                 &mut params_buffers,
                 render_view,
                 render_view,
+                BackdropTextureRole::Scene,
+                BackdropTextureRole::Scene,
                 target_view,
+                &backdrop_textures
+                    .as_ref()
+                    .context("backdrop textures unavailable")?
+                    .4,
                 &BackdropParams {
                     bounds: [
                         0.0,
@@ -2458,6 +2588,16 @@ impl WgpuRenderer {
                 },
                 &self.resources().pipelines.backdrop_copy,
                 wgpu::LoadOp::Clear(clear_color),
+                Bounds {
+                    origin: Point {
+                        x: DevicePixels(0),
+                        y: DevicePixels(0),
+                    },
+                    size: Size {
+                        width: DevicePixels(self.surface_config.width as i32),
+                        height: DevicePixels(self.surface_config.height as i32),
+                    },
+                },
             )?;
         }
 
@@ -2525,14 +2665,14 @@ impl WgpuRenderer {
     fn draw_backdrop_glass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        pass_resources: &mut Vec<BackdropPassResources>,
-        params_buffers: &mut std::slice::Iter<'_, wgpu::Buffer>,
+        params_buffers: &mut std::iter::Enumerate<std::slice::Iter<'_, wgpu::Buffer>>,
         glass: &BackdropGlass,
         pass_count: u32,
         scene: &wgpu::TextureView,
         horizontal: &wgpu::TextureView,
         vertical: &wgpu::TextureView,
         sharp: &wgpu::TextureView,
+        blur_weights: &wgpu::TextureView,
     ) -> Result<()> {
         let viewport = [
             self.surface_config.width as f32,
@@ -2542,6 +2682,15 @@ impl WgpuRenderer {
         let mask = glass.content_mask.bounds;
         let sigma = glass.material.blur_radius.0.max(1.0);
         let material = glass.material;
+        let Some(region) = glass.render_region(
+            pass_count,
+            Size {
+                width: DevicePixels(self.surface_config.width as i32),
+                height: DevicePixels(self.surface_config.height as i32),
+            },
+        ) else {
+            return Ok(());
+        };
 
         let mut lobes = [BackdropLobe::default(); MAX_GLASS_LOBES];
         let lobe_count = (glass.lobe_count as usize).min(MAX_GLASS_LOBES);
@@ -2561,6 +2710,13 @@ impl WgpuRenderer {
                 ],
             };
         }
+
+        let sigma_per_pass = if pass_count > 0 {
+            sigma / (pass_count as f32).sqrt()
+        } else {
+            1.0
+        };
+        let blur_radius = ((sigma_per_pass * 3.0).ceil() as u32).min(64);
 
         let base = BackdropParams {
             bounds: [
@@ -2583,11 +2739,7 @@ impl WgpuRenderer {
             ],
             viewport,
             direction: [1.0, 0.0],
-            sigma: if pass_count > 0 {
-                sigma / (pass_count as f32).sqrt()
-            } else {
-                1.0
-            },
+            sigma: sigma_per_pass,
             bevel: material.bevel.0,
             refraction: material.refraction,
             dispersion: material.dispersion,
@@ -2598,68 +2750,89 @@ impl WgpuRenderer {
             transmission_gain: material.transmission_gain,
             hairline: material.hairline.0,
             lobe_count: lobe_count as u32,
-            pad: 0,
+            blur_radius,
             optical_lift: [
                 material.optical_lift.r,
                 material.optical_lift.g,
                 material.optical_lift.b,
                 material.optical_lift.a,
             ],
+            edge_mask_edge: material.edge_mask_edge,
+            edge_mask_band: material.edge_mask_band.0,
+            _mask_pad: [0.0; 2],
             lobes,
         };
+
+        if pass_count > 0 {
+            self.draw_backdrop_blur_weights(encoder, params_buffers, blur_weights, &base)?;
+        }
 
         // Preserve the exact draw-order snapshot before deriving any frost.
         self.draw_backdrop_pass(
             encoder,
-            pass_resources,
             params_buffers,
             scene,
             scene,
+            BackdropTextureRole::Scene,
+            BackdropTextureRole::Scene,
             sharp,
+            blur_weights,
             &base,
             &self.resources().pipelines.backdrop_copy,
             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            region.sampling,
         )?;
 
         let mut source = sharp;
+        let mut source_role = BackdropTextureRole::Sharp;
         for _ in 0..pass_count {
             self.draw_backdrop_pass(
                 encoder,
-                pass_resources,
                 params_buffers,
                 source,
                 source,
+                source_role,
+                source_role,
                 horizontal,
+                blur_weights,
                 &base,
                 &self.resources().pipelines.backdrop_blur,
                 wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                region.sampling,
             )?;
             self.draw_backdrop_pass(
                 encoder,
-                pass_resources,
                 params_buffers,
                 horizontal,
                 horizontal,
+                BackdropTextureRole::Horizontal,
+                BackdropTextureRole::Horizontal,
                 vertical,
+                blur_weights,
                 &BackdropParams {
                     direction: [0.0, 1.0],
                     ..base
                 },
                 &self.resources().pipelines.backdrop_blur,
                 wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                region.sampling,
             )?;
             source = vertical;
+            source_role = BackdropTextureRole::Vertical;
         }
         self.draw_backdrop_pass(
             encoder,
-            pass_resources,
             params_buffers,
             source,
             sharp,
+            source_role,
+            BackdropTextureRole::Sharp,
             scene,
+            blur_weights,
             &base,
             &self.resources().pipelines.backdrop_composite,
             wgpu::LoadOp::Load,
+            region.visible,
         )?;
         Ok(())
     }
@@ -2781,51 +2954,126 @@ impl WgpuRenderer {
         *self.probe_values.get(slot as usize)?
     }
 
-    // Rendering boundaries pass distinct layout, scene, window, and application state.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_backdrop_pass(
+    fn draw_backdrop_blur_weights(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        pass_resources: &mut Vec<BackdropPassResources>,
-        params_buffers: &mut std::slice::Iter<'_, wgpu::Buffer>,
-        source: &wgpu::TextureView,
-        sharp: &wgpu::TextureView,
+        params_buffers: &mut std::iter::Enumerate<std::slice::Iter<'_, wgpu::Buffer>>,
         destination: &wgpu::TextureView,
         params: &BackdropParams,
-        pipeline: &wgpu::RenderPipeline,
-        load: wgpu::LoadOp<wgpu::Color>,
     ) -> Result<()> {
         let resources = self.resources();
-        let buffer = params_buffers
+        let (buffer_index, buffer) = params_buffers
             .next()
             .context("insufficient backdrop parameter buffers")?;
         resources
             .queue
             .write_buffer(buffer, 0, bytemuck::bytes_of(params));
-        let bind_group = resources
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("backdrop_bind_group"),
-                layout: &resources.bind_group_layouts.backdrop,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(source),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(sharp),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&resources.atlas_sampler),
-                    },
-                    wgpu::BindGroupEntry {
+        let mut bind_groups = resources.backdrop_blur_weight_bind_groups.borrow_mut();
+        if bind_groups.len() <= buffer_index {
+            bind_groups.resize_with(buffer_index + 1, || None);
+        }
+        let bind_group = bind_groups[buffer_index].get_or_insert_with(|| {
+            resources
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("backdrop_blur_weights_bind_group"),
+                    layout: &resources.bind_group_layouts.backdrop_blur_weights,
+                    entries: &[wgpu::BindGroupEntry {
                         binding: 3,
                         resource: buffer.as_entire_binding(),
-                    },
-                ],
+                    }],
+                })
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("backdrop_blur_weights_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: destination,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
+        pass.set_pipeline(&resources.pipelines.backdrop_blur_weights);
+        pass.set_bind_group(0, &*bind_group, &[]);
+        pass.draw(0..3, 0..1);
+        Ok(())
+    }
+
+    // Rendering boundaries pass distinct layout, scene, window, and application state.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_backdrop_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        params_buffers: &mut std::iter::Enumerate<std::slice::Iter<'_, wgpu::Buffer>>,
+        source: &wgpu::TextureView,
+        sharp: &wgpu::TextureView,
+        source_role: BackdropTextureRole,
+        sharp_role: BackdropTextureRole,
+        destination: &wgpu::TextureView,
+        blur_weights: &wgpu::TextureView,
+        params: &BackdropParams,
+        pipeline: &wgpu::RenderPipeline,
+        load: wgpu::LoadOp<wgpu::Color>,
+        scissor: Bounds<DevicePixels>,
+    ) -> Result<()> {
+        let resources = self.resources();
+        let (buffer_index, buffer) = params_buffers
+            .next()
+            .context("insufficient backdrop parameter buffers")?;
+        resources
+            .queue
+            .write_buffer(buffer, 0, bytemuck::bytes_of(params));
+        let mut bind_groups = resources.backdrop_bind_groups.borrow_mut();
+        if bind_groups.len() <= buffer_index {
+            bind_groups.resize_with(buffer_index + 1, || None);
+        }
+        let cached = &mut bind_groups[buffer_index];
+        if cached
+            .as_ref()
+            .is_none_or(|cached| cached.source != source_role || cached.sharp != sharp_role)
+        {
+            *cached = Some(CachedBackdropBindGroup {
+                source: source_role,
+                sharp: sharp_role,
+                bind_group: resources
+                    .device
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("backdrop_bind_group"),
+                        layout: &resources.bind_group_layouts.backdrop,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(source),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(sharp),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&resources.atlas_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::TextureView(blur_weights),
+                            },
+                        ],
+                    }),
             });
+        }
+        let bind_group = &cached
+            .as_ref()
+            .expect("the backdrop bind group was initialized")
+            .bind_group;
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("backdrop_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2841,12 +3089,14 @@ impl WgpuRenderer {
             ..Default::default()
         });
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.set_scissor_rect(
+            scissor.origin.x.0 as u32,
+            scissor.origin.y.0 as u32,
+            scissor.size.width.0 as u32,
+            scissor.size.height.0 as u32,
+        );
         pass.draw(0..3, 0..1);
-        drop(pass);
-        pass_resources.push(BackdropPassResources {
-            _bind_group: bind_group,
-        });
         Ok(())
     }
 
@@ -3546,7 +3796,7 @@ fn instance_range(range: Range<usize>) -> Range<u32> {
 }
 
 fn backdrop_glass_render_pass_count(pass_count: u32) -> usize {
-    pass_count as usize * 2 + 2
+    pass_count as usize * 2 + 2 + usize::from(pass_count > 0)
 }
 
 fn planned_backdrop_glass_pass_count(
@@ -3789,11 +4039,10 @@ mod tests {
         // declares has no gap the Rust side does not also have.
         assert_eq!(size_of::<BackdropLobe>(), 32);
         assert_eq!(size_of::<BackdropLobe>() % 16, 0);
-        // Everything ahead of the array occupies 128 bytes, which is a
+        // Everything ahead of the lobe array occupies 128 bytes, which is a
         // multiple of 16. The scalar register and optical-lift vector keep the
-        // array at the same offset in Rust and WGSL; otherwise it would start at an offset the
-        // shader rounds up and the Rust side does not, and every lobe would
-        // be read from the wrong place.
+        // array at the same offset in Rust and WGSL; otherwise the shader
+        // would round up where the Rust side did not.
         const HEADER: usize = 128;
         assert_eq!(HEADER % 16, 0, "the lobe array must start 16-byte aligned");
         assert_eq!(
@@ -3846,6 +4095,12 @@ mod tests {
     #[test]
     fn scene_admission_bounds_the_wgpu_parameter_buffer_plan() {
         let mut scene = Scene::default();
+        let blur_radius = MAX_GLASS_SIGMA_PER_PASS * 4.0;
+        let gaussian_render_passes_per_surface = backdrop_glass_with_radius(blur_radius)
+            .gaussian_pass_count()
+            .expect("the bounded test radius must fit the Gaussian pass budget")
+            as usize
+            * 2;
         let bounds = Bounds {
             origin: Point {
                 x: ScaledPixels(0.0),
@@ -3857,7 +4112,7 @@ mod tests {
             },
         };
         for _ in 0..1_000 {
-            let mut glass = backdrop_glass_with_radius(MAX_GLASS_SIGMA_PER_PASS * 4.0);
+            let mut glass = backdrop_glass_with_radius(blur_radius);
             glass.bounds = bounds;
             glass.content_mask = ContentMask { bounds };
             scene.insert_backdrop_glass(glass);
@@ -3881,6 +4136,8 @@ mod tests {
             required_parameter_buffers,
             MAX_BACKDROP_GLASS_GAUSSIAN_RENDER_PASSES_PER_FRAME
                 + MAX_BACKDROP_GLASS_SURFACES_PER_FRAME * 2
+                + MAX_BACKDROP_GLASS_GAUSSIAN_RENDER_PASSES_PER_FRAME
+                    / gaussian_render_passes_per_surface
                 + 1,
             "persistent parameter buffers are bounded by the surface and Gaussian budgets"
         );
