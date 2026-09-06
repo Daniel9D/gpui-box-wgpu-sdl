@@ -343,7 +343,9 @@ git commit -m "feat: reapply GPUI external image patches"
 - Preserve: host/kit exports in `src/gpui_wgpu.rs`
 
 **Interfaces:**
-- Consumes: `vendor/gpui-box/crates/gpui_wgpu` after Task 3 plus standalone commits `eccd5c5` and `23aa4ac`.
+- Consumes: `vendor/gpui-box/crates/gpui_wgpu` after Task 3, the complete
+  standalone-versus-vendor delta at checkpoint `2c50cd0a`, and refinement
+  commits `eccd5c5` and `23aa4ac`.
 - Produces: current upstream renderer with `WgpuContext::from_external`, `WgpuHeadlessRenderer::from_external`, `render_scene_to_view`, and external `TextureView` images preserved.
 
 - [ ] **Step 1: Copy upstream renderer-owned source files**
@@ -361,7 +363,21 @@ Get-ChildItem -LiteralPath $upstreamSrc -File |
   Copy-Item -Destination src -Force
 ```
 
-- [ ] **Step 2: Reapply the external-GPU host hooks**
+- [ ] **Step 2: Reapply the complete standalone renderer delta**
+
+Before applying individual refinements, compare the old standalone renderer
+with its old vendored source. This is required because `WgpuContext::from_external`
+originated in the initial standalone import (`ecc9306f`), not in `eccd5c5`:
+
+```powershell
+git diff 2c50cd0a:vendor/gpui-box/crates/gpui_wgpu/src/wgpu_context.rs 2c50cd0a:src/wgpu_context.rs
+git diff 2c50cd0a:vendor/gpui-box/crates/gpui_wgpu/src/wgpu_renderer.rs 2c50cd0a:src/wgpu_renderer.rs
+```
+
+Port every still-applicable integration point onto the refreshed source,
+including `WgpuContext::from_external`, the `host` feature gates,
+`new_headless_with_format`, and the public `WgpuHeadlessRenderer` direct-view
+API. Then apply the later renderer refinements:
 
 Run:
 
