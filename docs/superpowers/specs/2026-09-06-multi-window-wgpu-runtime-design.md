@@ -57,11 +57,12 @@ single-window facade.
 
 1. SDL3 is a first-class supported integration, not a temporary adapter.
 2. No new `EmbeddedAppContext` is introduced. The runtime reuses
-   `Application::with_platform` and `Application::run_embedded`.
+   `Application::new_inaccessible` and `Application::run_embedded`.
 3. `EmbeddedPlatform` and `EmbeddedWindow` provide the production platform
    implementation required by the external run loop.
-4. `WgpuRuntime::new` uses realtime execution. The builder may select
-   deterministic execution.
+4. `WgpuRuntime::new` and its public builder use realtime execution.
+   Deterministic execution remains crate-private until an external consumer
+   requires it.
 5. `WgpuHost::new` remains deterministic so `tick(elapsed)` retains its current
    behavior.
 6. One `WgpuRuntime` supports exactly one target texture format.
@@ -72,6 +73,10 @@ single-window facade.
    `EntityId` or reconstructing state.
 10. Clipboard integration supports UTF-8 text only in this version.
 11. Existing public APIs remain supported; new multi-window APIs are additive.
+12. Window lifetime is runtime-owned and closing is explicit; dropping an
+    opaque window handle never destroys a window.
+13. The runtime exposes wake and per-window redraw requests without depending
+    on SDL.
 
 ## Non-goals
 
@@ -98,11 +103,13 @@ SDL application / engine
     ├── Rc<EmbeddedPlatform>
     ├── RuntimeId
     ├── RendererShared
-    └── active window registry
-        ├── WgpuWindow A
+    └── generational window registry
+        ├── WindowEntry A
+        │   ├── AnyWindowHandle
         │   └── Rc<EmbeddedWindow>
         │       └── RendererWindowState A
-        └── WgpuWindow B
+        └── WindowEntry B
+            ├── AnyWindowHandle
             └── Rc<EmbeddedWindow>
                 └── RendererWindowState B
 ```
@@ -113,15 +120,17 @@ Runtime construction uses the existing embedded application entry point:
 
 ```text
 EmbeddedPlatform
--> Application::with_platform
+-> Application::new_inaccessible
 -> Application::with_assets
 -> Application::with_quit_mode(QuitMode::Explicit)
 -> Application::run_embedded
 -> ApplicationHandle
 ```
 
-`Application::with_platform` already provides GPUI's null HTTP client. A real
-HTTP client may be supplied through the runtime builder later without making
+`Application::new_inaccessible` uses the supplied platform while explicitly
+disabling accessibility, which is outside this version's scope. It also keeps
+the embedded path independent from native-window accessibility objects. A real
+HTTP client may be supplied through the runtime builder without making
 networking mandatory. Production code never constructs `FakeHttpClient`.
 
 `QuitMode::Explicit` is required: closing the last hosted window does not
@@ -146,6 +155,12 @@ platform state:
 
 Unsupported native features return their existing neutral result or an
 explicit unsupported error. They must not panic on ordinary embedded use.
+
+`EmbeddedWindow` implements `HasWindowHandle` and `HasDisplayHandle`, as
+required by `PlatformWindow`, but initially returns
+`raw_window_handle::HandleError::Unavailable` from both methods. Normal
+embedded rendering must not require either native handle. SDL pointers and
+platform-specific raw handles are not added to the WGPU runtime.
 
 The platform does not know about SDL handles. SDL synchronization remains in
 `gpui-box-sdl`, keeping the WGPU runtime usable with another external event
@@ -174,28 +189,29 @@ though GPUI owns it as `Box<dyn PlatformWindow>`.
 
 ### WgpuRuntime and WgpuWindow
 
-`WgpuRuntime` owns the application and all shared GPU resources.
-`WgpuWindow` is a non-clonable caller-owned capability for one GPUI window.
+`WgpuRuntime` owns the application, all shared GPU resources, and every live
+window entry. `WgpuWindow` is a cheap, clonable opaque handle used to address
+one entry; it does not own the window.
 
 Conceptually, `WgpuWindow` contains:
 
 ```text
 WgpuWindow
 ├── RuntimeId
-├── opaque WgpuWindowId
-├── AnyWindowHandle
-├── Rc<EmbeddedWindow>
-├── logical size and scale
-└── open/closed state
+├── registry slot
+└── slot generation
 ```
 
 `RendererWindowState` is owned exactly once, inside `EmbeddedWindow`, because
 that is the object receiving `PlatformWindow::draw`. `WgpuWindow` reaches it
-through the concrete platform-window handle and never duplicates it.
+through the runtime registry and never duplicates it. The registry entry also
+owns the `AnyWindowHandle` and all mutable logical/platform state.
 
-Every window-scoped operation validates both `RuntimeId` and open state before
-touching GPUI or GPU state. A window from another runtime is rejected even if
-its internal slot identifier happens to match.
+Every window-scoped operation validates `RuntimeId`, slot, and generation
+before touching GPUI or GPU state. A closed handle is stale because its entry
+was removed or its generation changed. A handle from another runtime is
+rejected even if its slot and generation happen to match. Cloning or dropping
+a `WgpuWindow` has no lifecycle effect; closing remains explicit.
 
 ### Renderer ownership
 
@@ -231,15 +247,22 @@ The signatures below describe the intended contract. Exact argument names may
 change during implementation, but the ownership and behavior may not.
 
 ```rust,ignore
-pub enum RuntimeMode {
-    Realtime,
-    Deterministic,
-}
-
 pub struct WgpuRuntime;
 pub struct WgpuRuntimeBuilder;
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct WgpuWindow;
-pub struct WgpuWindowId(/* private */);
+
+pub struct WgpuWindowState {
+    pub cursor_style: gpui::CursorStyle,
+    pub cursor_visible: bool,
+    pub text_input_active: bool,
+    pub ime_area: Option<gpui::Bounds<gpui::Pixels>>,
+}
+
+pub enum CloseOutcome {
+    KeptOpen,
+    Closed,
+}
 
 pub struct TextPreedit {
     pub text: String,
@@ -272,47 +295,52 @@ impl WgpuRuntime {
 
     pub fn update_window<R>(
         &mut self,
-        window: &WgpuWindow,
+        window: WgpuWindow,
         update: impl FnOnce(&mut gpui::Window, &mut gpui::App) -> R,
     ) -> anyhow::Result<R>;
 
     pub fn dispatch(
         &mut self,
-        window: &mut WgpuWindow,
+        window: WgpuWindow,
         input: gpui::PlatformInput,
     ) -> anyhow::Result<gpui::DispatchEventResult>;
 
     pub fn dispatch_text(
         &mut self,
-        window: &mut WgpuWindow,
+        window: WgpuWindow,
         text: &str,
     ) -> anyhow::Result<()>;
 
     pub fn dispatch_text_editing(
         &mut self,
-        window: &mut WgpuWindow,
+        window: WgpuWindow,
         editing: TextPreedit,
     ) -> anyhow::Result<()>;
 
     pub fn set_window_focus(
         &mut self,
-        window: &mut WgpuWindow,
+        window: WgpuWindow,
         focused: bool,
     ) -> anyhow::Result<()>;
 
     pub fn render_window(
         &mut self,
-        window: &mut WgpuWindow,
+        window: WgpuWindow,
         target: &wgpu::TextureView,
         physical_size: wgpu::Extent3d,
         scale_factor: f32,
     ) -> anyhow::Result<()>;
 
-    pub fn close_window(&mut self, window: &mut WgpuWindow)
+    pub fn request_close_window(&mut self, window: WgpuWindow)
+        -> anyhow::Result<CloseOutcome>;
+
+    pub fn close_window(&mut self, window: WgpuWindow)
         -> anyhow::Result<()>;
 
     pub fn pump(&mut self);
-    pub fn advance(&mut self, elapsed: Duration) -> anyhow::Result<()>;
+    pub fn take_redraw_requests(&mut self) -> Vec<WgpuWindow>;
+    pub fn window_state(&self, window: WgpuWindow)
+        -> anyhow::Result<WgpuWindowState>;
 }
 ```
 
@@ -320,26 +348,27 @@ The concrete preedit type is renderer- and SDL-independent and contains owned
 UTF-8 text plus an optional UTF-16 selection range. `gpui-box-sdl` performs the
 SDL-specific range conversion before calling the runtime.
 
-`WgpuWindow` exposes read-only state required by the embedder:
+`WgpuWindowState` exposes the read-only state required by the embedder:
 
-- opaque ID for routing;
-- whether it is closed;
 - requested cursor style and visibility;
 - whether SDL text input should be active;
 - current logical IME input area when available.
 
-It does not expose renderer internals or a mutable GPUI window reference.
+`WgpuWindow` itself exposes only an opaque stable routing identity. It does not
+expose renderer internals, a mutable GPUI window reference, registry indices,
+or generations.
 
 ### Builder
 
-`WgpuRuntime::new` is the realtime convenience constructor. The builder adds
-only options with an established use:
+`WgpuRuntime::new` is the realtime convenience constructor. The public builder
+adds only options with an established use:
 
-- `RuntimeMode`;
 - optional HTTP client.
+- optional `Fn() + Send + Sync + 'static` wake callback.
 
 No builder replaces `WgpuHost::new`, and no speculative configuration is
-added.
+added. Deterministic construction and virtual-time advancement are
+crate-private implementation details used by `WgpuHost` and tests.
 
 ### WgpuHost compatibility
 
@@ -384,8 +413,8 @@ thread.
 
 ### Deterministic
 
-Deterministic mode preserves virtual-time behavior for `WgpuHost`, tests, and
-repeatable capture:
+The crate-private deterministic mode preserves virtual-time behavior for
+`WgpuHost`, tests, and repeatable capture:
 
 - time changes only through `advance`;
 - scheduled work is ordered deterministically;
@@ -406,7 +435,8 @@ gated.
 4. Resolve the concrete `EmbeddedWindow` created for that GPUI handle.
 5. Create its empty `RendererWindowState`.
 6. Register the opaque window ID only after all prior steps succeed.
-7. Return `(WgpuWindow, Entity<V>)`.
+7. Return `(WgpuWindow, Entity<V>)`, where the window value contains only the
+   runtime identity, slot, and generation.
 
 Failure rolls back every partially created registry entry and leaves existing
 windows usable.
@@ -426,9 +456,21 @@ do not guess a destination.
 
 ### Close
 
-`close_window` invokes GPUI's normal removal path. The caller-owned handle is
-marked closed only after GPUI removes the window successfully. Renderer state
-and pending probes for that window are then dropped.
+There are two explicit close operations:
+
+- `request_close_window` invokes GPUI's `on_should_close` contract. It returns
+  `KeptOpen` when the callback vetoes closure and `Closed` only after GPUI
+  removes the window.
+- `close_window` is the unconditional programmatic operation. It uses GPUI's
+  normal removal callbacks but does not ask `on_should_close` for permission.
+
+`SDL_EVENT_WINDOW_CLOSE_REQUESTED` always maps to `request_close_window`.
+Application shutdown or an explicit caller policy may use `close_window`.
+
+After successful removal, renderer state and pending probes for that window
+are dropped and the registry slot generation advances. Every outstanding copy
+of its `WgpuWindow` consequently becomes stale. Dropping a `WgpuWindow` does
+nothing; the runtime remains the sole owner of live window entries.
 
 Closing one window cannot close another. Closing the last window cannot quit
 the runtime. Calling any window operation afterward, including a second
@@ -464,6 +506,24 @@ view even when GPUI content has not changed; the caller may have acquired a
 different surface texture. Frame lifecycle callbacks still run through the
 registered `PlatformWindow` path.
 
+### Wake and redraw
+
+GPUI frame requests, timers, async completion, and platform wakeups mark the
+affected window dirty. On the first transition from no pending work to pending
+work, the runtime invokes the optional wake callback. The callback only wakes
+the external loop; it must not call back into `WgpuRuntime`.
+
+After waking on its owner thread, the caller invokes `pump()` and then
+`take_redraw_requests()`. The latter returns each live dirty window at most
+once until it becomes dirty again. This supports both continuously rendering
+engines and blocking loops such as `SDL_WaitEvent`. The SDL integration may
+implement the wake callback with a custom `SDL_PushEvent`, but the core has no
+SDL dependency.
+
+Calling `render_window` consumes that window's pending redraw request. Forced
+rendering remains supported because every acquired surface texture may need a
+fresh presentation even when GPUI content is unchanged.
+
 The runtime never acquires, configures, or presents a surface. Queue ordering
 guarantees that caller writes submitted before `render_window` are visible to
 external images, and caller work submitted after it may overlay the result.
@@ -472,10 +532,13 @@ Only one temporary target may be installed at a time. Reentrant or concurrent
 render attempts return an error before changing target state. The guard clears
 the target on success, ordinary error, or unwind.
 
-The target's base texture format is checked against the runtime format.
-View-format overrides and subresource constraints that are not exposed by the
-safe `TextureView` API are left to WGPU validation and surfaced through the
-render error channel.
+The explicit `physical_size` is retained. `TextureView::texture()` exposes the
+base texture's size and properties, but not the view's mip, layer range, or
+descriptor; deriving the render extent from the base texture would therefore
+silently reject or mis-size valid subresource views. The target's inspectable
+base texture properties are validated, while view-format overrides and
+subresource constraints unavailable through the safe `TextureView` API are
+left to WGPU validation and surfaced through the render error channel.
 
 ## Input and SDL3 routing
 
@@ -486,10 +549,32 @@ existing APIs and adds multi-window routing.
 SDL_Event.windowID
 -> SdlWindowRouter
 -> per-window SdlInputAdapter
--> SdlHostEvent tagged with SDL_WindowID
+-> RoutedSdlHostEvent
 -> caller's SDL_WindowID -> WgpuWindow association
 -> WgpuRuntime operation on that WgpuWindow
 ```
+
+`SdlHostEvent` remains unchanged. Adding a variant would break existing
+consumers that match it exhaustively. `SdlWindowRouter` instead returns a new
+additive envelope:
+
+```rust,ignore
+pub enum RoutedSdlHostEvent {
+    Window {
+        window_id: SdlWindowId,
+        event: SdlHostEvent,
+    },
+    CloseRequested {
+        window_id: SdlWindowId,
+    },
+    Quit,
+}
+```
+
+The router emits `Window` only for events belonging to a specific SDL window,
+`CloseRequested` for `SDL_EVENT_WINDOW_CLOSE_REQUESTED`, and `Quit` for the
+application-level `SDL_EVENT_QUIT`. A close request is routed to
+`WgpuRuntime::request_close_window`.
 
 Each SDL window has its own adapter so these states never leak across windows:
 
@@ -504,6 +589,12 @@ An additive `adapt_into` API accepts caller-owned reusable storage. Replacing
 the public return type with `SmallVec` is forbidden because that would break
 source compatibility. A separate crate is not introduced unless another real
 backend needs the renderer-independent adapter.
+
+The WGPU bridge dependency becomes an optional `wgpu-runtime` feature, enabled
+by default alongside `build-from-source`. Building with
+`--no-default-features --features build-from-source` permits using the SDL
+event adapter without `gpui-box-wgpu`; existing default builds and
+`SdlPlatformBridge` source compatibility remain unchanged.
 
 ### Platform callback delivery
 
@@ -741,6 +832,7 @@ Required recovery behavior:
 | UTF-8 clipboard | Preserved |
 | GPUI-to-SDL cursor mapping | Preserved per hovered window |
 | Resize, focus, and quit host events | Preserved and routed by window |
+| SDL per-window close request | Added without changing existing event variants |
 | Default build and WASM renderer | Must continue compiling |
 
 ## Test strategy
@@ -756,6 +848,9 @@ needed. A refactor is not allowed to weaken a test to obtain a pass.
 - Compile `host` without `gpui/test-support`.
 - Compile `kit` and its GPUI Box Kit reexport.
 - Compile existing `gpui-box-sdl` APIs.
+- Compile `gpui-box-sdl` with its default WGPU bridge and with
+  `--no-default-features --features build-from-source` as an adapter-only
+  crate.
 - Compile `WgpuRuntime`, `WgpuWindow`, and builder APIs.
 - Check WASM without native host APIs.
 
@@ -763,14 +858,21 @@ needed. A refactor is not allowed to weaken a test to obtain a pass.
 
 - Reject invalid logical and physical geometry.
 - Reject invalid scale.
-- Reject closed and wrong-runtime handles.
+- Reject stale-generation and wrong-runtime handles.
 - Reject second close and render reentrancy.
+- Verify cloning or dropping a window handle has no lifecycle effect.
+- Verify a vetoed close request keeps the window and handle valid.
+- Verify explicit close invalidates every copy of the handle.
 - Close the last window and open another.
 - Roll back a failed open.
 - Shut down exactly once.
 - Verify realtime timer progress.
 - Verify deterministic ordering and virtual time.
 - Verify legacy `WgpuHost::tick` behavior.
+- Coalesce repeated redraw requests and wake only on a no-work to pending-work
+  transition.
+- Verify native window/display handle queries return `Unavailable` and normal
+  embedded paths never require them.
 
 ### Serialized GPU integration tests
 
@@ -792,6 +894,8 @@ needed. A refactor is not allowed to weaken a test to obtain a pass.
 - Preserve every existing keyboard, mouse, text, file-drop, clipboard, cursor,
   resize, focus, and end-to-end host test.
 - Route two SDL window IDs through independent adapters.
+- Route `SDL_EVENT_WINDOW_CLOSE_REQUESTED` to only its target window while
+  retaining application-level `Quit`.
 - Keep modifiers, pointer state, viewport, and drops isolated.
 - Apply focus and hover to only the routed window.
 - Start and stop text input per SDL window.
@@ -826,29 +930,48 @@ CI is established before the architectural refactor:
 A GPU test may skip only when no compatible adapter is found. Once an adapter
 and device exist, any later error is a test failure.
 
+## Upstream synchronization policy
+
+Before the architectural refactor, resynchronize the vendored GPUI Box in an
+isolated branch or worktree. The dry run must inventory every existing vendor
+patch, reapply the external-image integration, and pass the compatibility and
+CI gates before the pinned commit changes on the implementation branch.
+
+After that resynchronization, freeze the exact upstream commit for the duration
+of this refactor. Do not mix later upstream movement into individual phases.
+Maintain a small documented manifest or CI allowlist of files intentionally
+different from the pinned vendor baseline so accidental vendor drift is
+visible. Updating upstream again is a separate reviewed change.
+
 ## Revised implementation order
 
-1. Freeze public compatibility in compile tests and establish the
-   multiplatform CI matrix.
-2. Split renderer ownership logically into shared and per-window state.
-3. Add execution modes, per-window asynchronous probes, and remove waits from
-   realtime resize/render.
-4. Implement `EmbeddedPlatform` and `EmbeddedWindow` on the existing
+1. Dry-run the upstream resynchronization in isolation, inventory and reapply
+   the vendor patch stack, pass existing gates, then update and freeze the pin.
+2. Freeze public compatibility in compile tests, add vendor-drift checks, and
+   establish the multiplatform CI matrix.
+3. Close the raw-handle, generational window ownership, request-close, routed
+   SDL close, and wake/redraw contracts in tests.
+4. Split renderer ownership logically into shared and per-window state.
+5. Add crate-private deterministic execution, per-window asynchronous probes,
+   and remove waits from realtime resize/render.
+6. Implement `EmbeddedPlatform` and `EmbeddedWindow` on the existing
    `Application::run_embedded` path.
-5. Implement direct presentation through `PlatformWindow` callbacks in one
+7. Implement direct presentation through `PlatformWindow` callbacks in one
    single-window vertical slice.
-6. Add `WgpuRuntime`/`WgpuWindow`, runtime identity, multi-window lifecycle,
+8. Add `WgpuRuntime`/`WgpuWindow`, runtime identity, multi-window lifecycle,
    and independent close/recovery.
-7. Complete focus, hover, IME, clipboard, and cursor platform behavior.
-8. Add SDL window routing while preserving all current SDL APIs.
-9. Implement and test identity-preserving detach/reattach primitives.
-10. Rebuild `WgpuHost` as one deterministic runtime plus one window; then
-    remove production's test-support dependency and dummy image path.
-11. Add bounded external-image and atlas bind-group caches after profiling.
-12. Add measured buffer/vector reuse and `SdlInputAdapter::adapt_into`.
-13. Split `wgpu_renderer.rs` physically along the proven shared/window/cache
+9. Complete focus, hover, IME, clipboard, cursor, wake, and redraw behavior.
+10. Add SDL window routing and per-window close requests while preserving all
+    current SDL APIs; make the WGPU bridge optional but default-on.
+11. Implement and test identity-preserving detach/reattach primitives.
+12. Rebuild `WgpuHost` as one crate-private deterministic runtime plus one
+    window; then remove production's test-support dependency and dummy image
+    path.
+13. Add bounded external-image and atlas bind-group caches after profiling.
+14. Add measured buffer/vector reuse and `SdlInputAdapter::adapt_into`.
+15. Split `wgpu_renderer.rs` physically along the proven shared/window/cache
     boundaries without changing public renderer APIs.
-14. Finish builder options, documentation, examples, and full verification.
+16. Finish builder options, documentation, examples, and full verification.
 
 Each phase must leave existing tests green. No phase removes the old path
 before its compatibility facade runs on the new path.
@@ -862,10 +985,17 @@ before its compatibility facade runs on the new path.
 - The caller owns every target and all surface lifecycle operations.
 - Realtime rendering, resize, and probe polling perform no synchronous wait or
   CPU readback.
-- Deterministic mode retains reproducible timers and probe results.
+- The crate-private deterministic mode retains reproducible timers and probe
+  results for `WgpuHost` and tests.
 - A failed or closed window cannot poison another window.
 - Closing the last window leaves the runtime reusable.
 - Wrong-runtime handles are rejected.
+- Stale generational handles are rejected, while cloning or dropping a handle
+  never closes its runtime-owned window.
+- Window close requests can be vetoed and are distinct from unconditional
+  programmatic close.
+- Event-driven hosts can wake and identify every window needing redraw without
+  polling continuously.
 - A detached entity returns to its origin with the same `EntityId`, state, and
   subscriptions.
 - `WgpuHost` remains source- and behavior-compatible.
@@ -886,10 +1016,10 @@ before its compatibility facade runs on the new path.
 | Decouple SDL from `WgpuHost` | Adapter internals stay renderer-independent | SDL remains first-class; current bridge stays supported and gains runtime/window routing. |
 | Focus, IME, clipboard, cursor | All are completed | They move before compatibility cutover and are explicitly scoped global vs per-window. |
 | Bind-group caches | Cache both external images and atlas | Add weak lifetime, texture generation, device invalidation, and measurement gate. |
-| Realtime/deterministic | Both modes remain | Move before public multi-window release; split renderer state so probes cannot cross windows. |
+| Realtime/deterministic | Both execution semantics remain | Realtime is public; deterministic construction stays crate-private for `WgpuHost` and tests until an external use exists. |
 | Reuse allocations/SmallVec | Allocation work remains possible | Preserve `Vec` API and add `adapt_into`; optimize only after measurement. |
 | Split renderer file | Public API remains unchanged | Split logical ownership early, physical files only after boundaries stabilize. |
-| Builder and CI | Both remain | CI becomes phase zero; builder is introduced when execution mode needs configuration, without replacing existing constructors. |
+| Builder and CI | Both remain | Upstream resync and CI precede the refactor; the public builder adds only HTTP and wake configuration. |
 
 The result preserves the original plan's external ownership model while
 removing its reliance on test infrastructure and adding the lifecycle,
