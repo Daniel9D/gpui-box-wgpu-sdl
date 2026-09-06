@@ -240,6 +240,9 @@ record provenance only.
 
 ```powershell
 git add vendor/gpui-box
+# Do not run `git diff --cached --check` for this snapshot commit. The exact
+# upstream tree contains historical trailing whitespace in fixture/patch files;
+# rewriting those bytes would itself create vendor drift.
 git commit -m "build: resync vendored GPUI Box upstream"
 ```
 
@@ -470,9 +473,11 @@ Expected: import fails because `check_vendor_drift.py` does not exist.
 The script must:
 
 1. read the exact `Revision:` and allowlist bullets from `vendor/gpui-box/FORK_PATCHES.md`;
-2. download `https://github.com/fran0220/gpui-box/archive/<revision>.tar.gz` with `urllib.request` into `TemporaryDirectory`;
-3. extract with `tarfile` using the safe data filter;
-4. hash regular files under the extracted root and `vendor/gpui-box` with `hashlib.sha256`;
+2. download `https://github.com/fran0220/gpui-box/archive/<revision>.tar.gz` with `urllib.request`;
+3. read archive members directly instead of extracting them;
+4. hash regular members and vendored files with `hashlib.sha256`, treating an
+   archive symlink as the UTF-8 bytes of its link target because Git with
+   `core.symlinks=false` materializes that target as an ordinary file on Windows;
 5. ignore only the exact allowlist paths;
 6. print sorted missing, extra, or changed paths and exit one when drift exists.
 
