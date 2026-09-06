@@ -142,6 +142,7 @@ pub struct WgpuHost {
     renderer: Rc<RefCell<DirectRendererState>>,
     logical_size: gpui::Size<gpui::Pixels>,
     scale_factor: Option<f32>,
+    cursor_style: gpui::CursorStyle,
 }
 
 impl WgpuHost {
@@ -181,6 +182,7 @@ impl WgpuHost {
             renderer,
             logical_size: initial_size,
             scale_factor: None,
+            cursor_style: gpui::CursorStyle::default(),
         })
     }
 
@@ -206,9 +208,13 @@ impl WgpuHost {
         &mut self,
         input: gpui::PlatformInput,
     ) -> anyhow::Result<gpui::DispatchEventResult> {
+        if matches!(input, gpui::PlatformInput::MouseMove(_)) {
+            self.context.show_cursor();
+        }
         let result = self.context.update_window(self.window, |_, window, cx| {
             window.dispatch_event(input, cx)
         })?;
+        self.cursor_style = self.context.cursor_style(self.window)?;
         self.context.run_until_parked();
         Ok(result)
     }
@@ -225,6 +231,28 @@ impl WgpuHost {
         })?;
         self.context.run_until_parked();
         Ok(())
+    }
+
+    /// Imports UTF-8 text from the embedding platform's clipboard.
+    pub fn set_clipboard_text(&mut self, text: String) {
+        self.context
+            .update(|cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text)));
+    }
+
+    /// Returns UTF-8 text last written to GPUI's clipboard.
+    pub fn clipboard_text(&mut self) -> Option<String> {
+        self.context
+            .update(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+    }
+
+    /// Returns the cursor style requested during the latest paint.
+    pub fn cursor_style(&self) -> gpui::CursorStyle {
+        self.cursor_style
+    }
+
+    /// Returns whether the embedding platform should display the cursor.
+    pub fn is_cursor_visible(&self) -> bool {
+        self.context.is_cursor_visible()
     }
 
     pub fn render_to_view(
@@ -264,6 +292,7 @@ impl WgpuHost {
         })?;
         self.logical_size = logical_size;
         self.scale_factor = Some(scale_factor);
+        self.cursor_style = self.context.cursor_style(self.window)?;
         result
     }
 }

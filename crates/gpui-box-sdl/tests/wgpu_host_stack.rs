@@ -35,6 +35,7 @@ impl Render for ProbeView {
         let input = Rc::clone(&self.state.input);
         div()
             .size_full()
+            .cursor_pointer()
             .track_focus(&self.focus)
             .on_mouse_move(move |_, _, _| mouse_moved.set(true))
             .on_key_down(move |event, _, _| {
@@ -95,6 +96,9 @@ fn raw_sdl_input_reaches_real_gpui_listeners_through_wgpu_host() {
     .unwrap();
     host.render_to_view(&view, EXTENT, 1.0).unwrap();
 
+    host.set_clipboard_text("olá do SDL".to_owned());
+    assert_eq!(host.clipboard_text().as_deref(), Some("olá do SDL"));
+
     let mut adapter = SdlInputAdapter::new(Viewport::default()).unwrap();
     let mouse = sdl::SDL_Event {
         motion: sdl::SDL_MouseMotionEvent {
@@ -127,6 +131,10 @@ fn raw_sdl_input_reaches_real_gpui_listeners_through_wgpu_host() {
 
     assert!(state.mouse_moved.get());
     assert_eq!(&*state.input.borrow(), &["x", "olá"]);
+    assert_eq!(host.cursor_style(), gpui::CursorStyle::PointingHand);
+    assert!(!host.is_cursor_visible());
+    deliver(&mut host, unsafe { adapter.adapt(&mouse) }).unwrap();
+    assert!(host.is_cursor_visible());
 }
 
 fn deliver(host: &mut WgpuHost, events: Vec<SdlHostEvent>) -> anyhow::Result<()> {

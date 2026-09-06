@@ -21,8 +21,8 @@ build-from-source = ["sdl3-sys/build-from-source"]
 [dependencies]
 anyhow = "1"
 gpui = { package = "gpui-box", path = "../../vendor/gpui-box/crates/gpui" }
+gpui_wgpu = { package = "gpui-box-wgpu", path = "../..", features = ["host"] }
 sdl3-sys = "=0.6.8"
 
 [dev-dependencies]
-gpui_wgpu = { package = "gpui-box-wgpu", path = "../..", features = ["host"] }
 pollster = "0.4"

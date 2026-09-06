@@ -1,4 +1,4 @@
-use std::ffi::CStr;
+use std::{ffi::CStr, path::PathBuf};
 
 use sdl3_sys::everything as sdl;
 
@@ -44,6 +44,7 @@ pub struct SdlInputAdapter {
     capslock: gpui::Capslock,
     pointer: gpui::Point<gpui::Pixels>,
     pressed_button: Option<gpui::MouseButton>,
+    drop_paths: Vec<PathBuf>,
 }
 
 impl SdlInputAdapter {
@@ -55,6 +56,7 @@ impl SdlInputAdapter {
             capslock: gpui::Capslock::default(),
             pointer: gpui::point(gpui::px(0.0), gpui::px(0.0)),
             pressed_button: None,
+            drop_paths: Vec::new(),
         })
     }
 
@@ -91,6 +93,10 @@ impl SdlInputAdapter {
             }
             sdl::SDL_EVENT_TEXT_INPUT => self.adapt_text_input(unsafe { event.text }),
             sdl::SDL_EVENT_TEXT_EDITING => self.adapt_text_editing(unsafe { event.edit }),
+            sdl::SDL_EVENT_DROP_BEGIN
+            | sdl::SDL_EVENT_DROP_FILE
+            | sdl::SDL_EVENT_DROP_POSITION
+            | sdl::SDL_EVENT_DROP_COMPLETE => self.adapt_file_drop(unsafe { event.drop }),
             sdl::SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED => self
                 .adapt_resize(unsafe { event.window })
                 .into_iter()
@@ -225,6 +231,37 @@ impl SdlInputAdapter {
             start: event.start,
             length: event.length,
         })]
+    }
+
+    fn adapt_file_drop(&mut self, event: sdl::SDL_DropEvent) -> Vec<SdlHostEvent> {
+        self.pointer = self.map_position(event.x, event.y);
+        match event.r#type {
+            sdl::SDL_EVENT_DROP_BEGIN => self.drop_paths.clear(),
+            sdl::SDL_EVENT_DROP_FILE => {
+                if let Some(path) = copy_text(event.data).filter(|path| !path.is_empty()) {
+                    self.drop_paths.push(path.into());
+                }
+            }
+            sdl::SDL_EVENT_DROP_COMPLETE if !self.drop_paths.is_empty() => {
+                let paths = gpui::ExternalPaths(self.drop_paths.drain(..).collect());
+                return vec![
+                    SdlHostEvent::Input(gpui::PlatformInput::FileDrop(
+                        gpui::FileDropEvent::Entered {
+                            position: self.pointer,
+                            paths,
+                        },
+                    )),
+                    SdlHostEvent::Input(gpui::PlatformInput::FileDrop(
+                        gpui::FileDropEvent::Submit {
+                            position: self.pointer,
+                        },
+                    )),
+                    SdlHostEvent::Input(gpui::PlatformInput::FileDrop(gpui::FileDropEvent::Ended)),
+                ];
+            }
+            _ => {}
+        }
+        Vec::new()
     }
 
     fn adapt_resize(&self, event: sdl::SDL_WindowEvent) -> Option<SdlHostEvent> {

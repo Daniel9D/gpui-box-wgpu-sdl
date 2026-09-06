@@ -38,7 +38,7 @@ are still valid. Route normal input to the GPUI host and retain control of
 resize, focus, quit, and IME policy in the application:
 
 ```no_run
-use gpui_sdl::{SdlHostEvent, SdlInputAdapter, Viewport};
+use gpui_sdl::{SdlHostEvent, SdlInputAdapter, SdlPlatformBridge, Viewport};
 use gpui_wgpu::WgpuHost;
 use sdl3_sys::everything as sdl;
 
@@ -77,6 +77,17 @@ unsafe fn adapt_one(
 }
 
 let _adapter = SdlInputAdapter::new(Viewport::default())?;
+
+fn sync_platform(
+    host: &mut WgpuHost,
+    bridge: &mut SdlPlatformBridge,
+) -> anyhow::Result<()> {
+    // Pull before dispatching a paste shortcut.
+    bridge.pull_clipboard(host)?;
+    // Push after GPUI actions, then apply the cursor after input or rendering.
+    bridge.push_clipboard(host)?;
+    bridge.sync_cursor(host)
+}
 # Ok::<(), anyhow::Error>(())
 ```
 
@@ -96,13 +107,60 @@ gpui_position = (sdl_position - viewport_origin) / viewport_scale
 extent and the current display scale to `WgpuHost::render_to_view`; do not apply
 the input viewport transform to physical resize values.
 
-## Initial event coverage
+## SDL3 input coverage
 
-- Mouse motion, five buttons, wheel, and mouse leave.
-- Key down/up, repeat, Ctrl/Alt/Shift/GUI, and Caps Lock.
-- Committed UTF-8 text and distinct IME preedit data.
-- Physical pixel resize, focus gained/lost, and quit.
+`SdlInputAdapter::adapt` currently recognizes these SDL3 events:
 
-Unsupported event categories return no output. Clipboard, cursor commands,
-touch, gamepads, accessibility, drag-and-drop, and full bidirectional IME
-integration remain application or future adapter responsibilities.
+| Category | SDL3 events | GPUI Box output or behavior |
+| --- | --- | --- |
+| Pointer motion | `SDL_EVENT_MOUSE_MOTION` | `MouseMove`, with coordinates transformed through `Viewport` and the retained pressed-button state. |
+| Pointer buttons | `SDL_EVENT_MOUSE_BUTTON_DOWN`, `SDL_EVENT_MOUSE_BUTTON_UP` | `MouseDown` and `MouseUp` for left, right, middle, X1, and X2. X1/X2 map to back/forward navigation. |
+| Mouse wheel | `SDL_EVENT_MOUSE_WHEEL` | `ScrollWheel` in line units, including `SDL_MOUSEWHEEL_FLIPPED`. |
+| Pointer exit | `SDL_EVENT_WINDOW_MOUSE_LEAVE` | `MouseExited`. |
+| Keyboard | `SDL_EVENT_KEY_DOWN`, `SDL_EVENT_KEY_UP` | `KeyDown` and `KeyUp`, including repeat and modifier state. |
+| Committed text | `SDL_EVENT_TEXT_INPUT` | `SdlHostEvent::TextInput`; deliver it with `WgpuHost::dispatch_text`. |
+| IME preedit | `SDL_EVENT_TEXT_EDITING` | `SdlHostEvent::TextEditing`; the application remains responsible for presenting and controlling the composition session. |
+| File drop | `SDL_EVENT_DROP_BEGIN`, `SDL_EVENT_DROP_FILE`, `SDL_EVENT_DROP_POSITION`, `SDL_EVENT_DROP_COMPLETE` | Accumulates UTF-8 file paths and emits one GPUI `FileDrop` session: `Entered`, `Submit`, then `Ended`. Drop positions update the pointer; files are submitted on completion. |
+| Physical resize | `SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED` | `SdlHostEvent::WindowResized` with physical pixel dimensions. |
+| Focus | `SDL_EVENT_WINDOW_FOCUS_GAINED`, `SDL_EVENT_WINDOW_FOCUS_LOST` | `SdlHostEvent::FocusChanged`; losing focus also clears retained buttons and modifiers. |
+| Application quit | `SDL_EVENT_QUIT` | `SdlHostEvent::Quit`. |
+
+### Keyboard coverage
+
+- Printable ASCII and Unicode keycodes are supported. Printable key names are
+  normalized to lowercase for stable shortcut matching.
+- Ctrl, Alt, Shift, GUI/Command, and Caps Lock are tracked. Key-repeat is
+  preserved on `KeyDown`.
+- Named keys cover navigation and editing, F1-F24, locks and system keys,
+  standard and extended keypad keys, clipboard/edit commands, volume and media
+  controls, browser/application-control keys, and mobile/meta/hyper keys.
+- Keyboard events do not populate `key_char`. Text is emitted exclusively from
+  `SDL_EVENT_TEXT_INPUT`, avoiding duplicate text when a key also has a printable
+  keycode.
+- Unknown, non-printable keycodes without a named mapping produce no key event.
+  Modifier state is still updated when applicable.
+
+### Platform bridge
+
+Clipboard and cursor support are synchronized explicitly through
+`SdlPlatformBridge`; they are not emitted as `SdlHostEvent` input events.
+
+- The system clipboard supports UTF-8 text import and export only. Images,
+  custom MIME formats, and primary selections are not supported.
+- Every GPUI `CursorStyle` is mapped to the closest SDL system cursor. Cursor
+  visibility and native cursor lifetime are managed by the bridge.
+
+### Not currently supported
+
+- Touch, pen/tablet, gesture, joystick, gamepad, and sensor input.
+- `SDL_EVENT_DROP_TEXT`; drag-and-drop currently accepts files only.
+- Clipboard change notifications such as `SDL_EVENT_CLIPBOARD_UPDATE`; callers
+  pull and push UTF-8 text explicitly through the platform bridge.
+- Full bidirectional IME control, including candidate-window placement and SDL
+  text-input session start/stop policy. Preedit data is exposed to the caller.
+- Mouse buttons other than left, right, middle, X1, and X2.
+- Window events other than pixel resize, focus, and mouse leave. In particular,
+  `SDL_EVENT_WINDOW_CLOSE_REQUESTED` is not translated; only `SDL_EVENT_QUIT`
+  produces `SdlHostEvent::Quit`.
+
+All other SDL3 event categories return no adapter output.
