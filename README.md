@@ -5,7 +5,7 @@ wgpu device and queue, render GPUI into your texture, and keep window creation,
 swapchain management, presentation, and native events in your application.
 Requires Rust 1.97+ and wgpu 30.0.1.
 
-GPUI Box is pinned to `5c7e9eb6de8c8db3e7ff659934166218fb60f9f2`.
+GPUI Box is pinned to `ab8f37f6cbdee575f78cd4564597e9ae4d44e65c`.
 See [UPSTREAM.md](UPSTREAM.md) for provenance and licenses.
 
 ## Add to a project
@@ -188,7 +188,9 @@ gpui_position = (native_position - viewport_origin) / viewport_scale
 | composition      | `SdlHostEvent::TextEditing`       | marked range and `SDL_EVENT_TEXT_EDITING` data  |
 | resize/HiDPI     | `render_to_view`                  | physical extent and positive scale factor       |
 | focus            | `SdlHostEvent::FocusChanged`      | loss also clears retained input state           |
-| cursor/clipboard | future bidirectional adapter      | GPUI platform requests and SDL responses        |
+| file drop        | `FileDropEvent`                   | UTF-8 paths accumulated through one drop session |
+| UTF-8 clipboard  | `SdlPlatformBridge`               | explicit pull before paste and push after copy  |
+| cursor           | `SdlPlatformBridge`               | all GPUI cursor styles mapped to SDL cursors     |
 
 See the adapter README for `path`/Git dependencies, the raw-event safety
 contract, and a complete routing example.
@@ -256,13 +258,13 @@ backgrounds where the scene should remain visible. Match the composition blend
 state to the rendered texture's alpha representation; no CPU readback is needed.
 
 `host.update(|window, cx| ...)` allows changes to entities, focus, globals and
-clipboard. Clipboard in this headless host is in-process: synchronize it with
-SDL explicitly for OS copy/paste. IME composition, native cursors, accessibility
-transport, native menus, additional OS windows and real-I/O scheduling are not
-provided by this integration. The headless context installs a fake HTTP client
-that returns 404; components needing network resources require an
-engine-provided service. `tick` retains the test dispatcher, not a native
-production event loop.
+clipboard. Clipboard in this headless host is in-process; `SdlPlatformBridge`
+synchronizes UTF-8 text explicitly with the OS and also applies GPUI cursor
+requests to SDL. Full IME session control, accessibility transport, native
+menus, additional OS windows and real-I/O scheduling are not provided by this
+checkpoint. The headless context installs a fake HTTP client that returns 404;
+components needing network resources require an engine-provided service.
+`tick` retains the test dispatcher, not a native production event loop.
 
 The focused integration check is:
 

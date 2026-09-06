@@ -534,7 +534,8 @@ git commit -m "ci: detect unreviewed GPUI vendor drift"
 
 **Files:**
 - Modify: `UPSTREAM.md`
-- Modify: `vendor/gpui-box/UPSTREAM.md`
+- Create: `vendor/gpui-box/UPSTREAM.md`
+- Modify: `README.md`
 - Modify: `Cargo.lock` only if Cargo generated a legitimate lockfile update.
 
 **Interfaces:**
@@ -543,7 +544,13 @@ git commit -m "ci: detect unreviewed GPUI vendor drift"
 
 - [ ] **Step 1: Update both provenance documents**
 
-Set the revision in both files to `ab8f37f6cbdee575f78cd4564597e9ae4d44e65c`. In root `UPSTREAM.md`, replace the statement that `host` intentionally uses `gpui/test-support` with: production compatibility still temporarily uses it at this checkpoint, and the multi-window runtime phase removes it only after `WgpuHost` delegates to `EmbeddedPlatform`.
+Set the revision in both provenance files and the README to
+`ab8f37f6cbdee575f78cd4564597e9ae4d44e65c`. In root `UPSTREAM.md`, replace
+the statement that `host` intentionally uses `gpui/test-support` with:
+production compatibility still temporarily uses it at this checkpoint, and
+the multi-window runtime phase removes it only after `WgpuHost` delegates to
+`EmbeddedPlatform`. Keep the README SDL coverage table aligned with the
+already-implemented file-drop, UTF-8 clipboard, and cursor bridge.
 
 Record these retained fork capabilities explicitly:
 

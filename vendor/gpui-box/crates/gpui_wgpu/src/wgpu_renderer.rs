@@ -3857,11 +3857,11 @@ mod tests {
         // declares has no gap the Rust side does not also have.
         assert_eq!(size_of::<BackdropLobe>(), 32);
         assert_eq!(size_of::<BackdropLobe>() % 16, 0);
-        // Everything ahead of the lobe array occupies 128 bytes, which is a
+        // Everything ahead of the lobe array occupies 144 bytes, which is a
         // multiple of 16. The scalar register and optical-lift vector keep the
         // array at the same offset in Rust and WGSL; otherwise the shader
         // would round up where the Rust side did not.
-        const HEADER: usize = 128;
+        const HEADER: usize = 144;
         assert_eq!(HEADER % 16, 0, "the lobe array must start 16-byte aligned");
         assert_eq!(
             size_of::<BackdropParams>(),
