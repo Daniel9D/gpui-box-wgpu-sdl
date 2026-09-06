@@ -179,21 +179,31 @@ git log --oneline 5c7e9eb6de8c8db3e7ff659934166218fb60f9f2..ab8f37f6cbdee575f78c
 
 Expected: output identifies the GPUI, renderer, and kit files that changed; save it in the task log, not in the repository.
 
-- [ ] **Step 3: Replace the vendor directory from `git archive`**
+- [ ] **Step 3: Replace the vendor directory from a temporary Git checkout**
 
 Run in the isolated worktree:
 
 ```powershell
-$archive = Join-Path ([System.IO.Path]::GetTempPath()) 'gpui-box-ab8f37f.tar'
-git archive --format=tar --output=$archive ab8f37f6cbdee575f78cd4564597e9ae4d44e65c
+$repositoryRoot = (git rev-parse --show-toplevel | Split-Path -Parent | Split-Path -Parent)
+$snapshot = Join-Path $repositoryRoot '.worktrees/upstream-snapshot'
+git worktree add --detach $snapshot ab8f37f6cbdee575f78cd4564597e9ae4d44e65c
 git rm -r vendor/gpui-box
 New-Item -ItemType Directory -Path vendor/gpui-box | Out-Null
-tar -xf $archive -C vendor/gpui-box
-Remove-Item -LiteralPath $archive
+Get-ChildItem -LiteralPath $snapshot -Force |
+  Where-Object Name -ne '.git' |
+  Copy-Item -Destination vendor/gpui-box -Recurse -Force
+git worktree remove --force $snapshot
 git add vendor/gpui-box
 ```
 
-Expected: `git status --short vendor/gpui-box` shows the upstream replacement and no files outside `vendor/gpui-box` changed.
+The temporary checkout is required on Windows because the upstream tree stores
+license links as Git symlinks (`mode 120000`); with `core.symlinks=false`, Git
+materializes them as ordinary files while `tar.exe` fails to create them.
+
+Expected: every path from `git ls-tree -r --name-only
+ab8f37f6cbdee575f78cd4564597e9ae4d44e65c` exists below
+`vendor/gpui-box`, `git status --short vendor/gpui-box` shows the upstream
+replacement, and no file outside `vendor/gpui-box` changed.
 
 - [ ] **Step 4: Create the fork patch manifest**
 

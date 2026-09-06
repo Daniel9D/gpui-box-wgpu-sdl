@@ -1,0 +1,319 @@
+import { expect, test } from "@playwright/test";
+import pngjs from "pngjs";
+
+const { PNG } = pngjs;
+
+async function openScene(page, testInfo, scene) {
+  const { backend, renderer } = testInfo.project.metadata;
+  await page.goto(`/index.html?scene=${scene}&theme=studio-light&backend=${backend}`);
+  await page.waitForFunction(() => window.gpuiKitGalleryReady === true);
+  expect((await snapshot(page)).nodes.some(node => node.id === "browser.gallery.root")).toBe(true);
+  await expect(page.locator("canvas")).toHaveCount(1);
+  await expect(page.locator("canvas")).toHaveAttribute("data-gpui-renderer", renderer);
+}
+
+async function snapshot(page) {
+  return JSON.parse(await page.evaluate(() => window.gpuiKitSemanticSnapshot));
+}
+
+async function node(page, id) {
+  await page.waitForFunction(
+    expected => JSON.parse(window.gpuiKitSemanticSnapshot).nodes.some(node => node.id === expected),
+    id,
+  );
+  return (await snapshot(page)).nodes.find(node => node.id === id);
+}
+
+function center(node) {
+  return {
+    x: node.bounds.x + node.bounds.width / 2,
+    y: node.bounds.y + node.bounds.height / 2,
+  };
+}
+
+async function pointer(page, type, position, buttons) {
+  await page.locator("canvas").dispatchEvent(type, {
+    bubbles: true,
+    button: 0,
+    buttons,
+    clientX: position.x,
+    clientY: position.y,
+    pointerId: 1,
+    pointerType: "mouse",
+    isPrimary: true,
+  });
+}
+
+async function settle(page) {
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+}
+
+function nonBlackPixelRatio(buffer) {
+  const image = PNG.sync.read(buffer);
+  let nonBlack = 0;
+  for (let offset = 0; offset < image.data.length; offset += 4) {
+    if (image.data[offset] > 24 || image.data[offset + 1] > 24 || image.data[offset + 2] > 24) {
+      nonBlack += 1;
+    }
+  }
+  return nonBlack / (image.width * image.height);
+}
+
+async function selection(page) {
+  return JSON.parse(await page.evaluate(() => window.gpuiBoxSelection));
+}
+
+test("ordinary control uses the catalog component and stable semantics", async ({ page }, testInfo) => {
+  await openScene(page, testInfo, "button");
+  const { renderer } = testInfo.project.metadata;
+  const primary = await node(page, "scene.button.primary");
+  const canvas = page.locator("canvas");
+  const idle = await canvas.screenshot();
+  await pointer(page, "pointermove", center(primary), 0);
+  await settle(page);
+  await expect(canvas).toHaveCSS("cursor", "pointer");
+  const hovered = await canvas.screenshot();
+  if (renderer === "webgl2") {
+    expect(hovered.equals(idle)).toBe(false);
+  }
+  await pointer(page, "pointerdown", center(primary), 1);
+  await settle(page);
+  await pointer(page, "pointerup", center(primary), 0);
+  await settle(page);
+});
+
+test("glass remains renderable after forced WebGPU compiles every pipeline", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.metadata.renderer !== "webgpu");
+
+  const pageErrors = [];
+  const consoleErrors = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  page.on("console", message => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+
+  await openScene(page, testInfo, "glass");
+  // Pipeline validation and uncaptured WebGPU errors are asynchronous. A
+  // ready flag alone used to pass several seconds before the canvas failed.
+  await page.waitForTimeout(5_000);
+  await settle(page);
+
+  expect(pageErrors).toEqual([]);
+  expect(consoleErrors).toEqual([]);
+  expect(nonBlackPixelRatio(await page.locator("canvas").screenshot())).toBeGreaterThan(0.25);
+});
+
+test("text input accepts real browser keyboard input", async ({ page }, testInfo) => {
+  await openScene(page, testInfo, "input");
+  const email = await node(page, "scene.input.invalid");
+  await pointer(page, "pointerdown", center(email), 1);
+  await pointer(page, "pointerup", center(email), 0);
+  await page.keyboard.press("Control+A");
+  await page.keyboard.type("edited@example.com");
+  await expect.poll(async () => (await node(page, "scene.input.invalid")).value)
+    .toBe("edited@example.com");
+});
+
+test("password scene edits and reveals without weakening redaction", async ({ page }, testInfo) => {
+  await openScene(page, testInfo, "auth-sign-in");
+  const password = await node(page, "scene.auth.sign-in.password");
+  await pointer(page, "pointerdown", center(password), 1);
+  await pointer(page, "pointerup", center(password), 0);
+  const nativePassword = page.locator('[data-gpui-accessibility] input[aria-label="Password"]');
+  await nativePassword.fill("browser-password-needle");
+  await expect.poll(async () => (await node(page, "scene.auth.sign-in.password")).value)
+    .toBe("[REDACTED]");
+  await expect(nativePassword).toHaveValue("[REDACTED]");
+  expect(JSON.stringify(await snapshot(page))).not.toContain("browser-password-needle");
+  expect(await page.locator("[data-gpui-accessibility]").evaluate(element => element.outerHTML))
+    .not.toContain("browser-password-needle");
+
+  const reveal = page.locator('[data-gpui-accessibility] button[aria-label="Reveal password"]');
+  await expect(reveal).toHaveCount(1);
+  await reveal.evaluate(element => element.click());
+  await settle(page);
+  expect(JSON.stringify(await snapshot(page))).not.toContain("browser-password-needle");
+  expect(await page.locator("[data-gpui-accessibility]").evaluate(element => element.outerHTML))
+    .not.toContain("browser-password-needle");
+});
+
+test("verification scene edits one redacted segmented input", async ({ page }, testInfo) => {
+  await openScene(page, testInfo, "auth-verification");
+  const code = await node(page, "scene.auth.verification.code");
+  await pointer(page, "pointerdown", center(code), 1);
+  await pointer(page, "pointerup", center(code), 0);
+  await page.keyboard.type("ABCDEF");
+  await expect.poll(async () => (await node(page, "scene.auth.verification.code")).description)
+    .toBe("6 of 6");
+  await expect.poll(async () => (await node(page, "scene.auth.verification.code")).value)
+    .toBe("[REDACTED]");
+  expect(JSON.stringify(await snapshot(page))).not.toContain("ABCDEF");
+  expect(await page.locator("[data-gpui-accessibility]").evaluate(element => element.outerHTML))
+    .not.toContain("ABCDEF");
+});
+
+test("overlay action dismisses the catalog dialog", async ({ page }, testInfo) => {
+  await openScene(page, testInfo, "dialog");
+  const dialog = page.locator('[data-gpui-accessibility] [role="dialog"]');
+  await expect(dialog).toHaveCount(1);
+  const cancel = dialog.locator('button[aria-label="Cancel"]');
+  await expect(cancel).toHaveCount(1);
+  await cancel.evaluate(element => element.click());
+  await expect(dialog).toHaveCount(0);
+});
+
+test("pointer cancellation never clicks and chord releases match their button", async ({ page }, testInfo) => {
+  await openScene(page, testInfo, "dialog");
+  const dialog = page.locator('[data-gpui-accessibility] [role="dialog"]');
+  const cancel = dialog.locator('button[aria-label="Cancel"]');
+  await expect(cancel).toHaveCount(1);
+  const bounds = await cancel.boundingBox();
+  const position = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+  for (const termination of ["pointercancel", "lostpointercapture", "blur"]) {
+    await pointer(page, "pointerdown", position, 1);
+    await settle(page);
+    if (termination === "blur") {
+      await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+    } else {
+      await pointer(page, termination, position, 0);
+      await pointer(page, termination, position, 0);
+    }
+    await pointer(page, "pointerup", position, 0);
+    await settle(page);
+    await expect(dialog).toHaveCount(1);
+  }
+  await pointer(page, "pointerdown", position, 1);
+  await pointer(page, "pointermove", position, 3); // right joins the left press
+  await pointer(page, "pointermove", position, 1); // only right is released
+  await settle(page);
+  await expect(dialog).toHaveCount(1);
+  await pointer(page, "pointerup", position, 0);
+  await expect(dialog).toHaveCount(0);
+});
+
+test("canvas drag follows the browser pointer path", async ({ page }, testInfo) => {
+  await openScene(page, testInfo, "node-graph");
+  const before = await node(page, "scene.graph.validate");
+  const from = center(before);
+  await pointer(page, "pointermove", from, 0);
+  await pointer(page, "pointerdown", from, 1);
+  for (let step = 1; step <= 6; step += 1) {
+    await pointer(page, "pointermove", {
+      x: from.x + step * 8,
+      y: from.y + step * (32 / 6),
+    }, 1);
+  }
+  await pointer(page, "pointerup", { x: from.x + 48, y: from.y + 32 }, 0);
+  await expect.poll(async () => (await node(page, "scene.graph.validate")).bounds.x)
+    .toBeGreaterThan(before.bounds.x + 20);
+});
+
+test("developer data scenes render from the runtime catalog with stable semantics", async ({ page }, testInfo) => {
+  const scenes = [
+    ["log-stream", ["scene.log", "scene.log.entries", "scene.log.stale"]],
+    ["diff-view", ["scene.diff.unified", "scene.diff.split"]],
+    ["sparkline", ["scene.sparkline.rate", "scene.sparkline.stale"]],
+  ];
+
+  for (const [scene, ids] of scenes) {
+    await openScene(page, testInfo, scene);
+    const catalog = JSON.parse(await page.evaluate(() => window.gpuiKitCatalog));
+    expect(catalog.scenes).toContain(scene);
+    for (const id of ids) {
+      expect(await node(page, id)).toBeDefined();
+    }
+  }
+});
+
+test("treegrid mirrors accessible ancestry and accepts row selection", async ({ page }, testInfo) => {
+  await openScene(page, testInfo, "tree-grid");
+  const treegrid = page.locator('[data-gpui-accessibility] [role="treegrid"]');
+  const row = treegrid.locator('[role="row"][aria-label="components"]');
+  const cells = row.locator('[role="gridcell"]');
+  await expect(treegrid).toHaveCount(1);
+  await expect(row).toHaveCount(1);
+  await expect(cells).toHaveCount(4);
+
+  const docs = await node(page, "scene.tree-grid.files.docs");
+  await pointer(page, "pointerdown", center(docs), 1);
+  await pointer(page, "pointerup", center(docs), 0);
+  await expect.poll(async () => (await node(page, "scene.tree-grid.files.docs")).selected)
+    .toBe(false);
+});
+
+for (const [scene, id, value] of [
+  ["cascader", "scene.cascader", "Release notes"],
+  ["anchor-list", "scene.anchor-list.inputs", undefined],
+  ["diagnostics-list", "scene.diagnostics.list.fixture-error", undefined],
+  ["offering-catalog", "scene.offering-catalog.results.archive.read", "tool"],
+]) {
+  test(`common application scene ${scene} publishes catalog semantics`, async ({ page }, testInfo) => {
+    await openScene(page, testInfo, scene);
+    const target = await node(page, id);
+    expect(target.bounds.width).toBeGreaterThan(0);
+    expect(target.bounds.height).toBeGreaterThan(0);
+    if (value !== undefined) expect(target.value).toBe(value);
+  });
+}
+
+test("AccessKit DOM mirrors role, focus, action, and canvas-scaled bounds", async ({ page }, testInfo) => {
+  await openScene(page, testInfo, "button");
+  const primary = await node(page, "scene.button.primary");
+  const canvas = await page.locator("canvas").boundingBox();
+  const accessible = page.locator('[data-gpui-accessibility] button[aria-label="Primary"]');
+  await expect(accessible).toHaveCount(1);
+  await accessible.focus();
+  await expect(accessible).toBeFocused();
+  const bounds = await accessible.boundingBox();
+  expect(Math.abs(bounds.x - (canvas.x + primary.bounds.x))).toBeLessThanOrEqual(1);
+  expect(Math.abs(bounds.y - (canvas.y + primary.bounds.y))).toBeLessThanOrEqual(1);
+  expect(Math.abs(bounds.width - primary.bounds.width)).toBeLessThanOrEqual(2);
+  expect(Math.abs(bounds.height - primary.bounds.height)).toBeLessThanOrEqual(2);
+});
+
+test("playground filters, selects, themes, syncs its URL, and reflows narrowly", async ({ page }, testInfo) => {
+  const { backend, renderer } = testInfo.project.metadata;
+  await page.goto(`/index.html?mode=playground&scene=button&theme=studio-light&backend=${backend}`);
+  await page.waitForFunction(() => window.gpuiKitGalleryReady === true);
+  await expect(page.locator("canvas")).toHaveAttribute("data-gpui-renderer", renderer);
+  expect(await node(page, "browser.playground.title")).toBeDefined();
+  const catalog = JSON.parse(await page.evaluate(() => window.gpuiKitCatalog));
+  expect((await node(page, "browser.playground.scenes")).value).toBe(String(catalog.scenes.length));
+
+  const query = await node(page, "browser.playground.search.query");
+  await pointer(page, "pointerdown", center(query), 1);
+  await pointer(page, "pointerup", center(query), 0);
+  await page.keyboard.type("badge");
+  await expect.poll(async () => (await node(page, "browser.playground.scenes")).value).toBe("1");
+
+  const badge = await node(page, "browser.playground.scenes.badge");
+  await pointer(page, "pointerdown", center(badge), 1);
+  await pointer(page, "pointerup", center(badge), 0);
+  await expect.poll(async () => (await selection(page)).scene).toBe("badge");
+  await expect.poll(() => new URL(page.url()).searchParams.get("scene")).toBe("badge");
+
+  const dark = await node(page, "browser.playground.theme.studio-dark");
+  await pointer(page, "pointerdown", center(dark), 1);
+  await pointer(page, "pointerup", center(dark), 0);
+  await expect.poll(async () => (await selection(page)).theme).toBe("studio-dark");
+  await expect.poll(() => new URL(page.url()).searchParams.get("theme")).toBe("studio-dark");
+
+  await pointer(page, "pointerdown", center(await node(page, "browser.playground.search.query")), 1);
+  await pointer(page, "pointerup", center(await node(page, "browser.playground.search.query")), 0);
+  await page.keyboard.press("Control+A");
+  await page.keyboard.type("button");
+  const button = await node(page, "browser.playground.scenes.button");
+  await pointer(page, "pointerdown", center(button), 1);
+  await pointer(page, "pointerup", center(button), 0);
+  await expect.poll(async () => (await selection(page)).scene).toBe("button");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await settle(page);
+  const navigation = await node(page, "browser.playground.scenes");
+  const preview = await node(page, "browser.playground.preview");
+  const lastButton = await node(page, "scene.button.link");
+  expect(navigation.bounds.width).toBeLessThanOrEqual(390);
+  expect(preview.bounds.y).toBeGreaterThan(navigation.bounds.y);
+  expect(lastButton.bounds.x + lastButton.bounds.width)
+    .toBeLessThanOrEqual(preview.bounds.x + preview.bounds.width);
+});

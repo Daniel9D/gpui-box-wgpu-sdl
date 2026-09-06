@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+packages=(
+  build-essential
+  clang
+  cmake
+  pkg-config
+  libfontconfig1-dev
+  libwayland-dev
+  libx11-xcb-dev
+  libxkbcommon-x11-dev
+  libvulkan1
+  musl-tools
+  xauth
+  xvfb
+)
+missing_packages=()
+for package in "${packages[@]}"; do
+  if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -Fq "install ok installed"; then
+    missing_packages+=("$package")
+  fi
+done
+
+if ((${#missing_packages[@]})); then
+  echo "Installing system build dependencies: ${missing_packages[*]}"
+  if ((EUID == 0)); then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing_packages[@]}"
+  else
+    sudo apt-get update
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing_packages[@]}"
+  fi
+else
+  echo "System build dependencies are already installed."
+fi
+
+if [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+
+if ! command -v rustup >/dev/null 2>&1; then
+  echo "Installing rustup."
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+    sh -s -- -y --profile minimal --default-toolchain none
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+
+profile_marker="# gpui-kit Rust toolchain"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >>"$HOME/.bash_profile" <<'EOF'
+
+# gpui-kit Rust toolchain
+if [ -f "$HOME/.cargo/env" ]; then
+  . "$HOME/.cargo/env"
+fi
+EOF
+fi
+
+toolchain="$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)"
+echo "Installing Rust $toolchain with repository-required components."
+rustup toolchain install "$toolchain" --profile minimal --component clippy --component rustfmt
+# The browser gallery needs wasm32; the hosted MCP release is a static
+# Linux/x86-64 musl executable built by tools/site/deploy-main.sh.
+rustup target add --toolchain "$toolchain" wasm32-unknown-unknown x86_64-unknown-linux-musl
+
+wasm_bindgen_version="0.2.127"
+if ! command -v wasm-bindgen >/dev/null 2>&1 ||
+  [[ "$(wasm-bindgen --version)" != "wasm-bindgen $wasm_bindgen_version" ]]; then
+  echo "Installing wasm-bindgen-cli $wasm_bindgen_version for the browser gallery."
+  cargo install wasm-bindgen-cli --version "$wasm_bindgen_version" --locked
+fi
+
+echo "Fetching locked Cargo dependencies."
+cargo fetch --locked
+
+if ! command -v npx >/dev/null 2>&1; then
+  echo "npx is required for the browser-gallery smoke." >&2
+  exit 1
+fi
+
+echo "Installing locked browser-gallery tools."
+npm --prefix examples/browser-gallery ci
+
+if [[ -n "${ORIGINGAME_SSH_PRIVATE_KEY_B64:-}" && -n "${ORIGINGAME_BWG_SSH_HOST:-}" ]]; then
+  echo "BWG deployment identity is available; tools/site/deploy-main.sh can deploy after a push."
+else
+  echo "BWG deployment is unavailable here: tools/site/deploy-main.sh needs ORIGINGAME_SSH_PRIVATE_KEY_B64 and ORIGINGAME_BWG_SSH_HOST (or GPUI_BOX_DEPLOY_SSH_KEY and GPUI_BOX_DEPLOY_HOST)." >&2
+fi
+
+echo "Orb setup complete."

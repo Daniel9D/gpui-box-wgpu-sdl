@@ -286,10 +286,16 @@ pub(super) fn ensure_menus(window: &mut Window, cx: &mut App) {
         menu.open_submenu("share", window, cx);
     });
 
+    // The catalog reviews the drawn surface. Left on `Native`, `open_at` would
+    // hand this list to the operating system on macOS and Windows: a modal
+    // popup no capture can hold, opened under every scene that shares these
+    // fixtures, and on Windows it takes the keyboard from the `menu` scene's
+    // exhibit while the native UIA check reads it.
     let context = cx.new(|cx| {
         ContextMenu::new("scene.context.run", window, cx)
             .name("Run actions")
             .target("run-a04")
+            .presentation(ContextMenuPresentation::InWindow)
             .menu(menu_items())
             .content(|_, cx| {
                 let theme = cx.theme().clone();
@@ -667,6 +673,9 @@ pub(super) fn glass(_window: &mut Window, cx: &mut App) -> AnyElement {
     // number of squares across and down: a board cut through the middle of a
     // square at the plate edge reads as a broken pattern rather than as the
     // ruled backdrop the optics are being measured against.
+    let checker_light = theme.colors.text_faint;
+    let checker_dark = theme.colors.canvas;
+    let checker_rule = theme.colors.divider.opacity(0.55);
     let checkerboard =
         |width: f32, height: f32| {
             let columns = (width / TILE).ceil() as usize;
@@ -687,9 +696,9 @@ pub(super) fn glass(_window: &mut Window, cx: &mut App) -> AnyElement {
                         .children((0..columns).map(move |column| {
                             div().flex_none().w(px(TILE)).h(px(TILE)).bg(
                                 if (row + column) % 2 == 0 {
-                                    theme.colors.text_faint
+                                    checker_light
                                 } else {
-                                    theme.colors.canvas
+                                    checker_dark
                                 },
                             )
                         }))
@@ -701,7 +710,7 @@ pub(super) fn glass(_window: &mut Window, cx: &mut App) -> AnyElement {
                         .left(px(column as f32 * 12.0))
                         .w(px(1.0))
                         .h(px(height))
-                        .bg(theme.colors.divider.opacity(0.55))
+                        .bg(checker_rule)
                 }))
                 .children((0..=(height / 12.0) as usize).map(|row| {
                     div()
@@ -710,7 +719,7 @@ pub(super) fn glass(_window: &mut Window, cx: &mut App) -> AnyElement {
                         .left(px(0.0))
                         .w(px(width))
                         .h(px(1.0))
-                        .bg(theme.colors.divider.opacity(0.55))
+                        .bg(checker_rule)
                 }))
         };
 
@@ -768,6 +777,26 @@ pub(super) fn glass(_window: &mut Window, cx: &mut App) -> AnyElement {
             "Liquid",
             "Subtle dispersion without turning the backdrop into a smear",
         ))
+        .child(caption(
+            &theme,
+            "Scroll edge: the soft ramp scatters content under floating glass",
+        ))
+        .child(
+            div()
+                .relative()
+                .h(px(PLATE_HEIGHT))
+                .w(px(PLATE_WIDTH))
+                .surface(&theme, Surface::Panel)
+                .radius(&theme, Radius::Card)
+                .overflow_hidden()
+                .child(checkerboard(PLATE_WIDTH, PLATE_HEIGHT))
+                .child(
+                    crate::layout::ScrollEdgeEffect::new("scene.glass.scroll-edge")
+                        .top(true)
+                        .soft()
+                        .band(36.0),
+                ),
+        )
         // The last two demonstrations sit side by side so the whole scene
         // stays inside the window a real display can give the gallery, which
         // is where the DirectX renderer gets looked at.
@@ -850,6 +879,7 @@ pub(super) fn glass(_window: &mut Window, cx: &mut App) -> AnyElement {
                                                 .preset(GlassPreset::Liquid)
                                                 .radius(Radius::Dialog)
                                                 .adaptive(true)
+                                                .adaptive_appearance(true)
                                                 .child(label(
                                                     "Bright",
                                                     "The reading lands next frame",

@@ -5,6 +5,16 @@ GPUI Box combines Apache-2.0 framework code with MIT kit/MCP code. Imported
 source and assets retain the licenses and attribution below. GPUI Box is an
 independent derivative and is not an official Zed Industries project.
 
+Windows per-child hosting regions, empty-frame clearing, and retry-safe native
+region ownership are original GPUI Box corrections; no additional source was
+imported and the historical receipts remain frozen.
+Shared mouse cancellation, button-bound capture and text/click cleanup,
+browser chord reconciliation, and Windows chord capture lifetime are also
+original GPUI Box work without additional imports.
+Opt-in inline deferred accessibility ancestry, ordered child reservations, and
+active-accessibility cache rebuilding are original GPUI Box work; no new
+third-party source or licenses are involved.
+
 GPUI / Zed
 --------------------------------------------------------------------------------
 Official source: https://github.com/zed-industries/zed
@@ -36,6 +46,12 @@ GPUI Box renderer work and likewise import no source.
 The renderer-backed linear, elliptical radial, and conic gradient primitives
 for up to eight ordered stops, including their Metal, Direct3D, WGPU, and
 WebGL shaders, are GPUI Box work and import no additional source.
+The analytic quad signed-distance-field gradient and the transform-derived
+antialiasing width that sizes the polychrome sprite corner mask are GPUI Box
+work over those existing shader contracts and import no additional source.
+The primitive-aware scroll-edge fade for filled paths, shadows, SVG masks,
+images, and sprite instances is GPUI Box work over those existing paint and
+shader contracts and imports no additional source, shader, or visual asset.
 The Metal monochrome-sprite contrast and gamma correction uses the same
 Microsoft Terminal / DirectWrite algorithm already present in the imported
 Direct3D and WGPU shaders; it is not a new third-party source drop.
@@ -239,7 +255,10 @@ sharp-rim blending, additive lift and measured hairline adapted at the GPUI Box
 framework boundary across Metal, WGPU and Direct3D. No Git or Cargo dependency;
 see PROVENANCE.md P12. The fixed per-frame surface admission budget,
 replay-aware ordinary-fill fallback, and rejection of over-budget probe work
-are subsequent GPUI Box work and import no additional source.
+are subsequent GPUI Box work and import no additional source. Conservative
+device-pixel work regions, WGPU GPU-resident Gaussian weights and bind-group
+reuse, and asynchronous Metal luminance publication are later GPUI Box
+renderer work and likewise import no additional source.
 License text: licenses/ZED-APACHE-2.0.txt
 
 alacritty_terminal
@@ -346,3 +365,39 @@ boundary and reuses its existing Kit menu. No upstream component menu model,
 root overlay, icon pipeline, source file, or Cargo dependency is included; see
 PROVENANCE.md P17.
 License text: LICENSE-APACHE
+
+Zed GPUI spring, gesture, and profiler source ports
+--------------------------------------------------------------------------------
+Source: https://github.com/zed-industries/zed
+Compared range: a6a23c7b80a5cefa0487b7856335be89ace7e483 to
+801c087af22dd189dc1aa49e2f370b4f04190b19
+Spring revision: 8b1497dbd22fb06f5838a7c0b84a1e54fafa71bc
+Gesture revisions: 956a49e4ca8aa4b7c2c293e1414c91f009824ae3,
+76b1096cbd83b5b5138793e5f552218abc8fdcbb,
+0855410ccd2040efbbf14d71409166b6c472e0bd,
+b3326e13c142fc8f313aca67a93dd6855a1e7e32,
+5e28272c1407ced4bae4a90deaea25352a1fbc96
+Profiler revisions: a21007b7a948e46afbe719150f5e9968bfcd1078,
+9e236090b9a31338caf233d440f724922b58d7e1,
+1861e58f984c76afc06032e753557994ffc8fe44,
+55007f518bc1d49e6b3291c5eaa1aabf649b36fd
+License: Apache-2.0
+Copyright 2022–2025 Zed Industries, Inc.
+Scope: adapted closed-form spring solver, interpolation and target projection,
+playback builder, sampled easing, stateful element animation lifecycle, and the
+portable single-touch recognizer/window dispatch for tap, pan, fling,
+touch-drag, and long press, plus the distinction between frame drawing and
+synchronous platform submission in profiler timing.
+Discovery reference only: Longbridge GPUI Kit v0.6.0 at
+94a313a72a2513aee2780240cd322d552b2395f0. Its Cargo.toml declared gpui-pre
+0.3.1 with Cargo's caret semantics; its lock file resolved gpui-pre 0.3.2.
+Reviewed package: https://crates.io/crates/gpui-pre/0.3.2
+Package checksum: c4680a36f5977d6e0892b0e7f3a2a9248a7b8acedc2b1975c88d4eb5517a21ad
+Nested source: Android Open Source Project `OverScroller.SplineOverScroller`,
+https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/widget/OverScroller.java
+License: Apache-2.0
+Copyright 2006 The Android Open Source Project
+Scope: friction-spline fling math transcribed by the identified package source.
+GPUI Box retains its sole local framework/package authority and includes no
+gpui-pre, Longbridge, Zed Git dependency, or Cargo patch; see PROVENANCE.md P18.
+License text: licenses/ZED-APACHE-2.0.txt

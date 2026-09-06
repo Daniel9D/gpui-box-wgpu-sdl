@@ -14,7 +14,6 @@
 //! save.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
@@ -74,13 +73,12 @@ struct Memory {
     editor: RefCell<Option<Editor>>,
 }
 
-type Memories = HashMap<SharedString, Rc<Memory>>;
-
 fn memory(id: &SharedString, window: &Window, cx: &mut App) -> Rc<Memory> {
-    window_state::with(
+    window_state::with_key(
+        id,
         window.window_handle().window_id(),
         cx,
-        |memories: &mut Memories| Rc::clone(memories.entry(id.clone()).or_default()),
+        |memory: &mut Rc<Memory>| Rc::clone(memory),
     )
 }
 
@@ -278,6 +276,8 @@ impl RenderOnce for InlineEdit {
         if !editing {
             let actionable = !self.disabled && self.on_edit.is_some();
             let empty = self.value.is_empty();
+            let reading_value_selector = format!("{}.reading-value", self.ident.semantic_id());
+            let pen_selector = format!("{}.pen", self.ident.semantic_id());
             let mut reading = div()
                 .id(self.ident.element_id())
                 .row()
@@ -308,8 +308,14 @@ impl RenderOnce for InlineEdit {
                         theme.colors.text_faint
                     } else {
                         theme.colors.text
-                    }),
+                    })
+                    .flex_1()
+                    .min_w_0()
+                    .when(self.multiline, |element| element.whitespace_normal())
+                    .when(!self.multiline, |element| element.truncate())
+                    .debug_selector(move || reading_value_selector),
                 )
+                .when(self.multiline, |element| element.items_start())
                 // Text that turns into a field has to say so before it is
                 // clicked, or it is text.
                 .when(actionable, |element| {
@@ -317,7 +323,8 @@ impl RenderOnce for InlineEdit {
                         gpui_kit_assets::icon(gpui_kit_assets::Icon::Pen)
                             .size(px(metrics.icon_size))
                             .flex_none()
-                            .text_color(theme.colors.text_faint),
+                            .text_color(theme.colors.text_faint)
+                            .debug_selector(move || pen_selector),
                     )
                 })
                 .when(actionable, |element| {
@@ -435,9 +442,7 @@ impl RenderOnce for InlineEdit {
                             ),
                         ))
                         .glow(&theme, theme.colors.danger),
-                    false => element.shadow(
-                        theme.focus_ring_on(theme.surface(gpui_kit_theme::Surface::Sunken)),
-                    ),
+                    false => element.shadow(theme.focus_ring()),
                 })
                 .text_size(px(metrics.font_size))
                 .child(field),

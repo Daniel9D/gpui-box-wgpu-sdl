@@ -5,9 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, DevicePixels, Edges,
-    ExternalImageHandle, ExternalImageId, Hsla, Pixels, Point, Radians, Rgba, ScaledPixels, Size,
-    bounds_tree::BoundsTree, point, white,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, DevicePixels, Edges, Hsla,
+    Pixels, Point, Radians, Rgba, ScaledPixels, Size, bounds_tree::BoundsTree, point, white,
 };
 use std::{
     fmt::Debug,
@@ -50,7 +49,6 @@ pub struct Scene {
     pub monochrome_sprites: Vec<MonochromeSprite>,
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
-    pub external_images: Vec<PaintExternalImage>,
     pub surfaces: Vec<PaintSurface>,
     /// Glass surfaces — deliberately outside the primitive batch stream so
     /// renderers can snapshot the framebuffer at each surface's order.
@@ -70,7 +68,6 @@ impl Scene {
         self.monochrome_sprites.clear();
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
-        self.external_images.clear();
         self.surfaces.clear();
         self.backdrop_glass.clear();
     }
@@ -92,7 +89,6 @@ impl Scene {
             && self.monochrome_sprites.is_empty()
             && self.subpixel_sprites.is_empty()
             && self.polychrome_sprites.is_empty()
-            && self.external_images.is_empty()
             && self.surfaces.is_empty()
             && self.backdrop_glass.is_empty()
     }
@@ -205,10 +201,6 @@ impl Scene {
                 sprite.order = order;
                 self.polychrome_sprites.push(*sprite);
             }
-            Primitive::ExternalImage(image) => {
-                image.sprite.order = order;
-                self.external_images.push(image.clone());
-            }
             Primitive::Surface(surface) => {
                 surface.order = order;
                 self.surfaces.push(surface.clone());
@@ -242,9 +234,6 @@ impl Scene {
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.polychrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.blend_mode, sprite.tile.tile_id));
-        // Unlike atlas sprites, external images cannot be regrouped by texture:
-        // equal-order images may overlap, so their insertion order is semantic.
-        self.external_images.sort_by_key(|image| image.sprite.order);
         self.surfaces.sort_by_key(|surface| surface.order);
         self.backdrop_glass.sort_by_key(|glass| glass.order);
     }
@@ -272,8 +261,6 @@ impl Scene {
             subpixel_sprites_iter: self.subpixel_sprites.iter().peekable(),
             polychrome_sprites_start: 0,
             polychrome_sprites_iter: self.polychrome_sprites.iter().peekable(),
-            external_images_start: 0,
-            external_images_iter: self.external_images.iter().peekable(),
             surfaces_start: 0,
             surfaces_iter: self.surfaces.iter().peekable(),
             backdrop_glass_iter: self.backdrop_glass.iter().peekable(),
@@ -284,7 +271,7 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BackgroundTag, ColorSpace, LinearColorStop, MAX_GRADIENT_STOPS};
+    use crate::{BackgroundTag, ColorSpace, LinearColorStop, MAX_GRADIENT_STOPS, size};
 
     #[test]
     fn empty_layers_do_not_make_a_scene_drawable() {
@@ -664,6 +651,8 @@ mod tests {
             specular_sharpness: 0.,
             smoothing: ScaledPixels(-8.),
             probe: NO_LUMINANCE_PROBE,
+            edge_mask_edge: f32::NAN,
+            edge_mask_band: ScaledPixels(-4.),
         }
         .sanitized();
 
@@ -723,6 +712,8 @@ mod tests {
             specular_sharpness: 12.,
             smoothing: Pixels(28.),
             probe: NO_LUMINANCE_PROBE,
+            edge_mask_edge: GlassEdge::Top.as_f32(),
+            edge_mask_band: Pixels(32.),
         };
 
         let device = logical.scale(2.);
@@ -731,6 +722,8 @@ mod tests {
         assert_eq!(device.bevel, ScaledPixels(28.));
         assert_eq!(device.smoothing, ScaledPixels(56.));
         assert_eq!(device.hairline, ScaledPixels(2.));
+        assert_eq!(device.edge_mask_band, ScaledPixels(64.));
+        assert_eq!(device.edge_mask_edge, logical.edge_mask_edge);
         assert_eq!(device.refraction, logical.refraction, "a ratio is a ratio");
         assert_eq!(device.dispersion, logical.dispersion);
         assert_eq!(device.specular, logical.specular);
@@ -787,6 +780,87 @@ mod tests {
             assert!((0.0..640.0).contains(&x), "column {x} is outside");
             assert!((0.0..480.0).contains(&y), "row {y} is outside");
         }
+    }
+
+    #[test]
+    fn backdrop_render_region_clips_rounds_and_keeps_every_sample_dependency() {
+        let mut glass = probe_glass((10.25, 20.25), (100.5, 50.5));
+        glass.content_mask.bounds = Bounds::from_corners(
+            point(ScaledPixels(20.2), ScaledPixels(0.)),
+            point(ScaledPixels(70.4), ScaledPixels(200.)),
+        );
+        glass.material.blur_radius = ScaledPixels(12.);
+        glass.material.bevel = ScaledPixels(10.);
+        glass.material.refraction = 0.3;
+        glass.material.dispersion = 0.1;
+
+        let region = glass
+            .render_region(4, size(DevicePixels(300), DevicePixels(300)))
+            .expect("the clipped surface is visible");
+
+        assert_eq!(
+            region.visible,
+            Bounds::from_corners(
+                point(DevicePixels(20), DevicePixels(20)),
+                point(DevicePixels(71), DevicePixels(71)),
+            )
+        );
+        // Four radius-18 supports plus six pixels for the capped, dispersed
+        // refraction reach the texture edge on the top and left.
+        assert_eq!(
+            region.sampling,
+            Bounds::from_corners(
+                point(DevicePixels(0), DevicePixels(0)),
+                point(DevicePixels(149), DevicePixels(149)),
+            )
+        );
+    }
+
+    #[test]
+    fn backdrop_render_region_keeps_clipped_probe_samples_current() {
+        let mut glass = probe_glass((100., 200.), (400., 80.));
+        glass.content_mask.bounds = Bounds::from_corners(
+            point(ScaledPixels(290.), ScaledPixels(230.)),
+            point(ScaledPixels(310.), ScaledPixels(250.)),
+        );
+        glass.material.blur_radius = ScaledPixels(0.);
+        glass.material.probe = 0;
+
+        let region = glass
+            .render_region(0, size(DevicePixels(1000), DevicePixels(1000)))
+            .expect("the clipped surface is visible");
+
+        assert_eq!(
+            region.sampling,
+            Bounds::from_corners(
+                point(DevicePixels(200), DevicePixels(220)),
+                point(DevicePixels(401), DevicePixels(261)),
+            )
+        );
+    }
+
+    #[test]
+    fn a_fully_clipped_backdrop_spends_no_renderer_work() {
+        let mut glass = probe_glass((10., 10.), (20., 20.));
+        glass.content_mask.bounds = Bounds::from_corners(
+            point(ScaledPixels(40.), ScaledPixels(40.)),
+            point(ScaledPixels(60.), ScaledPixels(60.)),
+        );
+
+        assert_eq!(
+            glass.render_region(1, size(DevicePixels(100), DevicePixels(100))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_backdrop_outside_the_viewport_spends_no_renderer_work() {
+        let glass = probe_glass((110., 110.), (20., 20.));
+
+        assert_eq!(
+            glass.render_region(1, size(DevicePixels(100), DevicePixels(100))),
+            None
+        );
     }
 
     #[test]
@@ -895,7 +969,7 @@ mod tests {
                 + size_of::<u32>()
         );
         assert_eq!(size_of::<GlassLobe>(), 8 * size_of::<f32>());
-        assert_eq!(size_of::<GlassMaterial>(), 15 * size_of::<f32>());
+        assert_eq!(size_of::<GlassMaterial>(), 17 * size_of::<f32>());
         assert_eq!(
             size_of::<PolychromeSprite>(),
             size_of::<DrawOrder>()
@@ -1058,7 +1132,6 @@ pub(crate) enum PrimitiveKind {
     MonochromeSprite,
     SubpixelSprite,
     PolychromeSprite,
-    ExternalImage,
     Surface,
 }
 
@@ -1082,7 +1155,6 @@ pub enum Primitive {
     MonochromeSprite(MonochromeSprite),
     SubpixelSprite(SubpixelSprite),
     PolychromeSprite(PolychromeSprite),
-    ExternalImage(PaintExternalImage),
     Surface(PaintSurface),
 }
 
@@ -1097,7 +1169,6 @@ impl Primitive {
             Primitive::MonochromeSprite(sprite) => &sprite.bounds,
             Primitive::SubpixelSprite(sprite) => &sprite.bounds,
             Primitive::PolychromeSprite(sprite) => &sprite.bounds,
-            Primitive::ExternalImage(image) => &image.sprite.bounds,
             Primitive::Surface(surface) => &surface.bounds,
         }
     }
@@ -1111,7 +1182,6 @@ impl Primitive {
             Primitive::MonochromeSprite(sprite) => &sprite.content_mask,
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
             Primitive::PolychromeSprite(sprite) => &sprite.content_mask,
-            Primitive::ExternalImage(image) => &image.sprite.content_mask,
             Primitive::Surface(surface) => &surface.content_mask,
         }
     }
@@ -1119,7 +1189,6 @@ impl Primitive {
     fn cull_bounds(&self) -> Bounds<ScaledPixels> {
         match self {
             Primitive::PolychromeSprite(sprite) => sprite.transformed_bounds(),
-            Primitive::ExternalImage(image) => image.sprite.transformed_bounds(),
             _ => *self.bounds(),
         }
     }
@@ -1147,8 +1216,6 @@ struct BatchIterator<'a> {
     subpixel_sprites_iter: Peekable<slice::Iter<'a, SubpixelSprite>>,
     polychrome_sprites_start: usize,
     polychrome_sprites_iter: Peekable<slice::Iter<'a, PolychromeSprite>>,
-    external_images_start: usize,
-    external_images_iter: Peekable<slice::Iter<'a, PaintExternalImage>>,
     surfaces_start: usize,
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
     backdrop_glass_iter: Peekable<slice::Iter<'a, BackdropGlass>>,
@@ -1180,12 +1247,6 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.polychrome_sprites_iter.peek().map(|s| s.order),
                 PrimitiveKind::PolychromeSprite,
-            ),
-            (
-                self.external_images_iter
-                    .peek()
-                    .map(|image| image.sprite.order),
-                PrimitiveKind::ExternalImage,
             ),
             (
                 self.surfaces_iter.peek().map(|s| s.order),
@@ -1363,35 +1424,6 @@ impl<'a> Iterator for BatchIterator<'a> {
                     range: sprites_start..sprites_end,
                 })
             }
-            PrimitiveKind::ExternalImage => {
-                let first = self
-                    .external_images_iter
-                    .peek()
-                    .expect("required framework invariant must hold");
-                let image_id = first.image.id();
-                let blend_mode = first.sprite.blend_mode;
-                let images_start = self.external_images_start;
-                let mut images_end = images_start + 1;
-                self.external_images_iter.next();
-                while self
-                    .external_images_iter
-                    .next_if(|image| {
-                        image.sprite.order < next_glass_order
-                            && (image.sprite.order, batch_kind) < max_order_and_kind
-                            && image.image.id() == image_id
-                            && image.sprite.blend_mode == blend_mode
-                    })
-                    .is_some()
-                {
-                    images_end += 1;
-                }
-                self.external_images_start = images_end;
-                Some(PrimitiveBatch::ExternalImages {
-                    image_id,
-                    blend_mode,
-                    range: images_start..images_end,
-                })
-            }
             PrimitiveKind::Surface => {
                 let surfaces_start = self.surfaces_start;
                 let mut surfaces_end = surfaces_start + 1;
@@ -1441,11 +1473,6 @@ pub enum PrimitiveBatch {
         blend_mode: SpriteBlendMode,
         range: Range<usize>,
     },
-    ExternalImages {
-        image_id: ExternalImageId,
-        blend_mode: SpriteBlendMode,
-        range: Range<usize>,
-    },
     Surfaces(Range<usize>),
 }
 
@@ -1482,14 +1509,6 @@ impl PrimitiveBatch {
                     texture_id.index
                 )
             }
-            Self::ExternalImages {
-                image_id,
-                blend_mode,
-                range,
-            } => format!(
-                "external images ({}, {blend_mode:?}) for {image_id:?}",
-                range.len()
-            ),
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
         }
     }
@@ -1685,6 +1704,38 @@ pub struct GlassMaterial<P = ScaledPixels> {
     /// That source is sharp for clear glass and blurred for frosted glass. See
     /// that method for what the delay means for a caller.
     pub probe: u32,
+    /// Which edge a linear mask fades from. Zero is none; 1 top, 2 bottom,
+    /// 3 left, 4 right. Stored as a float so the GPU struct stays one packed
+    /// run of 32-bit words.
+    pub edge_mask_edge: f32,
+    /// How far that fade reaches from the named edge, in the surface's unit.
+    /// Zero disables the mask even when [`Self::edge_mask_edge`] is set.
+    pub edge_mask_band: P,
+}
+
+/// Which edge a glass surface fades from, for a scroll-edge or similar ramp.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum GlassEdge {
+    /// No fade; the surface applies its optics uniformly.
+    #[default]
+    None = 0,
+    /// Full optics at the top edge, fading toward the bottom of the band.
+    Top = 1,
+    /// Full optics at the bottom edge, fading toward the top of the band.
+    Bottom = 2,
+    /// Full optics at the left edge, fading toward the right of the band.
+    Left = 3,
+    /// Full optics at the right edge, fading toward the left of the band.
+    Right = 4,
+}
+
+impl GlassEdge {
+    /// The GPU-facing discriminant, as a float so the material struct stays
+    /// one packed run of 32-bit words.
+    pub fn as_f32(self) -> f32 {
+        self as u32 as f32
+    }
 }
 
 impl<P: GlassLength> GlassMaterial<P> {
@@ -1706,6 +1757,8 @@ impl<P: GlassLength> GlassMaterial<P> {
             specular_sharpness: 1.,
             smoothing: P::from_raw(0.),
             probe: NO_LUMINANCE_PROBE,
+            edge_mask_edge: 0.,
+            edge_mask_band: P::from_raw(0.),
         }
     }
 
@@ -1762,6 +1815,17 @@ impl<P: GlassLength> GlassMaterial<P> {
         self.light_angle = finite(self.light_angle, 0.);
         self.specular_sharpness = finite(self.specular_sharpness, 1.).max(1.);
         self.smoothing = P::from_raw(finite(self.smoothing.raw(), 0.).max(0.));
+        self.edge_mask_edge = finite(self.edge_mask_edge, 0.).clamp(0., 4.);
+        self.edge_mask_band = P::from_raw(finite(self.edge_mask_band.raw(), 0.).max(0.));
+        self
+    }
+
+    /// Fade this surface from `edge` over `band`, mixing the optical result
+    /// back into the undisplaced sharp snapshot so the inner side of the
+    /// ramp is the content itself.
+    pub fn with_edge_mask(mut self, edge: GlassEdge, band: P) -> Self {
+        self.edge_mask_edge = edge.as_f32();
+        self.edge_mask_band = band;
         self
     }
 }
@@ -1784,6 +1848,8 @@ impl GlassMaterial<Pixels> {
             specular_sharpness: self.specular_sharpness,
             smoothing: self.smoothing.scale(factor),
             probe: self.probe,
+            edge_mask_edge: self.edge_mask_edge,
+            edge_mask_band: self.edge_mask_band.scale(factor),
         }
     }
 }
@@ -1819,6 +1885,21 @@ pub struct BackdropGlass {
     /// How many entries of `lobes` are real. Zero means the surface is the
     /// single rounded rect named by `bounds` and `corner_radii`.
     pub lobe_count: u32,
+}
+
+/// Integral device-pixel regions a backdrop renderer must preserve.
+///
+/// `visible` is the surface clipped by its content mask. `sampling` expands
+/// that region by every blur pass's finite Gaussian support and the material's
+/// maximum refracted displacement, and preserves any requested probe samples.
+/// A renderer may leave pixels outside `sampling` untouched in scratch
+/// textures because neither a fragment in `visible` nor a probe can read them.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct BackdropRenderRegion {
+    /// The integral pixels where the surface can produce fragments.
+    pub visible: Bounds<DevicePixels>,
+    /// The integral pixels that can contribute to those fragments.
+    pub sampling: Bounds<DevicePixels>,
 }
 
 const _: () = assert!(
@@ -1906,6 +1987,93 @@ impl BackdropGlass {
             .max(1.) as u32;
         (passes <= MAX_GLASS_GAUSSIAN_PASSES).then_some(passes)
     }
+
+    /// The clipped output and conservative scratch region for this surface.
+    ///
+    /// `gaussian_passes` is the number of same-variance passes the backend
+    /// will apply. A platform Gaussian is one pass; a clear surface is zero.
+    /// The Gaussian support is three standard deviations per pass. Refraction
+    /// is capped by the shader at 45% of bevel depth, with dispersion allowed
+    /// to move the furthest color channel one pixel farther for linear
+    /// sampling. Both regions are rounded outwards and clamped to `viewport`.
+    /// When the material requests a valid luminance probe, `sampling` also
+    /// retains each probe texel and its blur dependencies even when the
+    /// content mask clips that point out of `visible`.
+    pub fn render_region(
+        &self,
+        gaussian_passes: u32,
+        viewport: Size<DevicePixels>,
+    ) -> Option<BackdropRenderRegion> {
+        let clipped = self.bounds.intersect(&self.content_mask.bounds);
+        if clipped.size.width.0 <= 0. || clipped.size.height.0 <= 0. {
+            return None;
+        }
+
+        let sigma = if gaussian_passes > 0 {
+            self.material.blur_radius.0.max(1.) / (gaussian_passes as f32).sqrt()
+        } else {
+            0.
+        };
+        let blur_reach = (sigma * 3.).ceil() * gaussian_passes as f32;
+        let optical_reach = if self.material.bends_light() {
+            (self.material.bevel.0 * 0.45 * (1. + self.material.dispersion)).ceil() + 1.
+        } else {
+            0.
+        };
+        let reach = blur_reach + optical_reach;
+        let mut sampled_output = clipped;
+        if self.material.probe != NO_LUMINANCE_PROBE
+            && (self.material.probe as usize) < MAX_LUMINANCE_PROBES
+        {
+            for [x, y] in
+                self.probe_sample_points(viewport.width.0 as f32, viewport.height.0 as f32)
+            {
+                sampled_output = sampled_output.union(&Bounds {
+                    origin: point(ScaledPixels(x), ScaledPixels(y)),
+                    size: Size {
+                        width: ScaledPixels(1.),
+                        height: ScaledPixels(1.),
+                    },
+                });
+            }
+        }
+        let sampling = Bounds::from_corners(
+            point(
+                ScaledPixels(sampled_output.origin.x.0 - reach),
+                ScaledPixels(sampled_output.origin.y.0 - reach),
+            ),
+            point(
+                ScaledPixels(sampled_output.bottom_right().x.0 + reach),
+                ScaledPixels(sampled_output.bottom_right().y.0 + reach),
+            ),
+        );
+
+        let visible = integral_device_bounds(clipped, viewport);
+        if visible.size.width.0 <= 0 || visible.size.height.0 <= 0 {
+            return None;
+        }
+
+        Some(BackdropRenderRegion {
+            visible,
+            sampling: integral_device_bounds(sampling, viewport),
+        })
+    }
+}
+
+fn integral_device_bounds(
+    bounds: Bounds<ScaledPixels>,
+    viewport: Size<DevicePixels>,
+) -> Bounds<DevicePixels> {
+    let width = viewport.width.0.max(0) as f32;
+    let height = viewport.height.0.max(0) as f32;
+    let left = bounds.origin.x.0.floor().clamp(0., width) as i32;
+    let top = bounds.origin.y.0.floor().clamp(0., height) as i32;
+    let right = bounds.bottom_right().x.0.ceil().clamp(left as f32, width) as i32;
+    let bottom = bounds.bottom_right().y.0.ceil().clamp(top as f32, height) as i32;
+    Bounds::from_corners(
+        point(DevicePixels(left), DevicePixels(top)),
+        point(DevicePixels(right), DevicePixels(bottom)),
+    )
 }
 
 /// The largest standard deviation one separable gaussian pass can carry.
@@ -1928,6 +2096,25 @@ pub struct GlassField {
     /// The direction the distance increases in, normalized. Zero-length where
     /// the field is flat, which happens at the exact centre of a lobe.
     pub gradient: Point<f32>,
+}
+
+/// How strongly a surface's optics apply at `point`, given a linear edge mask.
+///
+/// 1 keeps the optical result; 0 restores the undisplaced sharp snapshot.
+/// The three shaders implement this same ramp.
+pub fn glass_edge_mask(point: Point<f32>, bounds: Bounds<f32>, edge: f32, band: f32) -> f32 {
+    if edge <= 0. || band <= 0. {
+        return 1.;
+    }
+    if edge < 1.5 {
+        1. - ((point.y - bounds.origin.y) / band).clamp(0., 1.)
+    } else if edge < 2.5 {
+        1. - ((bounds.origin.y + bounds.size.height - point.y) / band).clamp(0., 1.)
+    } else if edge < 3.5 {
+        1. - ((point.x - bounds.origin.x) / band).clamp(0., 1.)
+    } else {
+        1. - ((bounds.origin.x + bounds.size.width - point.x) / band).clamp(0., 1.)
+    }
 }
 
 /// Signed distance from `point` to one lobe, negative inside.
@@ -2407,21 +2594,6 @@ impl PolychromeSprite {
 impl From<PolychromeSprite> for Primitive {
     fn from(sprite: PolychromeSprite) -> Self {
         Primitive::PolychromeSprite(sprite)
-    }
-}
-
-/// A sprite whose texture is supplied directly by the active renderer.
-#[derive(Clone, Debug)]
-pub struct PaintExternalImage {
-    /// Backend-neutral image and renderer payload.
-    pub image: std::sync::Arc<ExternalImageHandle>,
-    /// Geometry and compositing parameters shared with polychrome sprites.
-    pub sprite: PolychromeSprite,
-}
-
-impl From<PaintExternalImage> for Primitive {
-    fn from(image: PaintExternalImage) -> Self {
-        Primitive::ExternalImage(image)
     }
 }
 

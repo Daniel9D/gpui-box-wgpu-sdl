@@ -483,7 +483,11 @@ impl Select {
             .w(px(geometry.width))
             .max_h(px(geometry.max_height))
             .id(self.ident.child("menu").element_id())
-            .child(viewport)
+            .child(popover::menu_body(
+                &self.ident.child("menu.fade"),
+                &self.scroll,
+                viewport,
+            ))
             .semantic_in(
                 cx,
                 NodeSpec::new(self.ident.child("menu").semantic_id(), Role::Menu),
@@ -675,7 +679,7 @@ impl Render for Select {
                     .glow(&theme, theme.colors.danger)
             })
             .when(focused && !self.invalid, |element| {
-                element.shadow(theme.focus_ring_on(theme.surface(gpui_kit_theme::Surface::Sunken)))
+                element.shadow(theme.focus_ring())
             })
             .when(!self.disabled, |element| {
                 element.cursor_pointer().on_mouse_down(

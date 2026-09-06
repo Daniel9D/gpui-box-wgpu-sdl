@@ -1,6 +1,7 @@
 use crate::{
-    Bounds, Capslock, Context, Empty, ImageFormat, IntoElement, Keystroke, Modifiers, Pixels,
-    Point, Render, Result, SharedString, Window, point, seal::Sealed,
+    Bounds, Capslock, Context, Empty, ImageFormat, IntoElement, Keystroke, LongPressEvent,
+    Modifiers, Pixels, Point, Render, Result, SharedString, TouchDragEvent, Window, point,
+    seal::Sealed,
 };
 use futures::{FutureExt as _, future::LocalBoxFuture};
 use smallvec::SmallVec;
@@ -111,11 +112,9 @@ pub struct TouchId(pub u64);
 
 /// A raw touch event from the platform.
 ///
-///
-/// Dispatch contract (core implementation pending): a touch is hit-tested
-/// once, at [`TouchPhase::Started`], occlusion-aware; all subsequent events
-/// for the same [`TouchId`] are delivered to the elements under the starting
-/// position, even after the touch moves outside them.
+/// The core recognizer classifies one touch stream at a time. Tap and pan
+/// routing remain anchored to the starting position; additional concurrent
+/// touches are ignored until the active stream resolves.
 #[derive(Clone, Debug, Default)]
 pub struct TouchEvent {
     /// Which touch this event belongs to.
@@ -124,6 +123,15 @@ pub struct TouchEvent {
     pub phase: TouchPhase,
     /// The position of the touch in window coordinates.
     pub position: Point<Pixels>,
+    /// Where the platform predicts the touch will be roughly one frame from
+    /// now, in the same coordinate space as `position`, when the platform
+    /// offers a prediction for a [`TouchPhase::Moved`] event.
+    ///
+    /// Best-effort latency compensation only: it may influence how far a
+    /// recognized pan scrolls within a frame, but never hit testing, gesture
+    /// classification, or velocity estimation. Later events reconcile any
+    /// prediction error.
+    pub predicted_position: Option<Point<Pixels>>,
     /// Normalized touch force in `0.0..=1.0`, if the hardware reports it.
     pub force: Option<f32>,
 }
@@ -193,6 +201,22 @@ impl InputEvent for MouseUpEvent {
 }
 
 impl MouseEvent for MouseUpEvent {}
+
+/// The platform ended a mouse/pointer stream without a release (capture loss,
+/// cancellation, or deactivation). This is not a mouse-up and must not click or
+/// drop. Window broadcasts it to mouse listeners even if propagation is stopped,
+/// then releases capture and cancels dragging. Gesture owners should discard
+/// pending presses during the capture phase. Repeated cancellation is harmless.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MouseCancelEvent;
+
+impl Sealed for MouseCancelEvent {}
+impl InputEvent for MouseCancelEvent {
+    fn to_platform_input(self) -> PlatformInput {
+        PlatformInput::MouseCancelled(self)
+    }
+}
+impl MouseEvent for MouseCancelEvent {}
 
 impl MouseUpEvent {
     /// Returns true if this mouse up event should focus the element.
@@ -461,6 +485,57 @@ impl MouseButton {
             MouseButton::Navigate(NavigationDirection::Back),
             MouseButton::Navigate(NavigationDirection::Forward),
         ]
+    }
+}
+
+/// Complete button state for platform adapters that receive button snapshots.
+/// Bits 0..4 denote left, right, middle, back and forward, respectively (the
+/// standard pointer `buttons` layout). Unknown bits are ignored. Reconciliation
+/// emits each changed button once, releases before presses, including chord
+/// transitions delivered in a move rather than a down/up platform message.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PointerButtonState(u16);
+
+impl PointerButtonState {
+    /// Reconcile a platform snapshot; the bool is true for a press.
+    pub fn update(&mut self, buttons: u16) -> Vec<(MouseButton, bool)> {
+        let buttons = buttons & 31;
+        let previous = self.0;
+        self.0 = buttons;
+        let mut changes = Vec::new();
+        if previous == buttons {
+            return changes;
+        }
+        for pressed in [false, true] {
+            for (index, button) in MouseButton::all().into_iter().enumerate() {
+                let mask = 1 << index;
+                if (previous ^ buttons) & mask != 0 && (buttons & mask != 0) == pressed {
+                    changes.push((button, pressed));
+                }
+            }
+        }
+        changes
+    }
+
+    /// One held button for the legacy move API, preferring left, right, middle,
+    /// back, then forward. Never returns an already released button.
+    pub fn pressed_button(self) -> Option<MouseButton> {
+        match self.0.trailing_zeros() {
+            0 => Some(MouseButton::Left),
+            1 => Some(MouseButton::Right),
+            2 => Some(MouseButton::Middle),
+            3 => Some(MouseButton::Navigate(NavigationDirection::Back)),
+            4 => Some(MouseButton::Navigate(NavigationDirection::Forward)),
+            _ => None,
+        }
+    }
+
+    /// Forget a cancelled stream without producing synthetic releases/clicks.
+    /// Returns whether any button was held; repeated calls return false.
+    pub fn cancel(&mut self) -> bool {
+        let active = self.0 != 0;
+        self.0 = 0;
+        active
     }
 }
 
@@ -989,6 +1064,8 @@ pub enum PlatformInput {
     MouseDown(MouseDownEvent),
     /// The mouse was released.
     MouseUp(MouseUpEvent),
+    /// A pointer stream ended without a release or click.
+    MouseCancelled(MouseCancelEvent),
     /// Mouse pressure.
     MousePressure(MousePressureEvent),
     /// The mouse was moved.
@@ -999,6 +1076,10 @@ pub enum PlatformInput {
     ScrollWheel(ScrollWheelEvent),
     /// A pinch gesture was performed.
     Pinch(PinchEvent),
+    /// A long-press gesture recognized from touch input.
+    LongPress(LongPressEvent),
+    /// A direct touch drag claimed by an element.
+    TouchDrag(TouchDragEvent),
     /// Files were dragged and dropped onto the window.
     FileDrop(FileDropEvent),
     /// Non-path native data was dragged and dropped onto the window.
@@ -1015,11 +1096,14 @@ impl PlatformInput {
             PlatformInput::ModifiersChanged { .. } => None,
             PlatformInput::MouseDown(event) => Some(event),
             PlatformInput::MouseUp(event) => Some(event),
+            PlatformInput::MouseCancelled(event) => Some(event),
             PlatformInput::MouseMove(event) => Some(event),
             PlatformInput::MousePressure(event) => Some(event),
             PlatformInput::MouseExited(event) => Some(event),
             PlatformInput::ScrollWheel(event) => Some(event),
             PlatformInput::Pinch(event) => Some(event),
+            PlatformInput::LongPress(event) => Some(event),
+            PlatformInput::TouchDrag(event) => Some(event),
             PlatformInput::FileDrop(event) => Some(event),
             PlatformInput::ExternalDrop(event) => Some(event),
             PlatformInput::Touch(_) => None,
@@ -1033,14 +1117,40 @@ impl PlatformInput {
             PlatformInput::ModifiersChanged(event) => Some(event),
             PlatformInput::MouseDown(_) => None,
             PlatformInput::MouseUp(_) => None,
+            PlatformInput::MouseCancelled(_) => None,
             PlatformInput::MouseMove(_) => None,
             PlatformInput::MousePressure(_) => None,
             PlatformInput::MouseExited(_) => None,
             PlatformInput::ScrollWheel(_) => None,
             PlatformInput::Pinch(_) => None,
+            PlatformInput::LongPress(_) => None,
+            PlatformInput::TouchDrag(_) => None,
             PlatformInput::FileDrop(_) => None,
             PlatformInput::ExternalDrop(_) => None,
             PlatformInput::Touch(_) => None,
+        }
+    }
+
+    /// A short static name for this input's variant, for diagnostics and
+    /// telemetry.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            PlatformInput::KeyDown(_) => "key_down",
+            PlatformInput::KeyUp(_) => "key_up",
+            PlatformInput::ModifiersChanged(_) => "modifiers_changed",
+            PlatformInput::MouseDown(_) => "mouse_down",
+            PlatformInput::MouseUp(_) => "mouse_up",
+            PlatformInput::MouseCancelled(_) => "mouse_cancelled",
+            PlatformInput::MousePressure(_) => "mouse_pressure",
+            PlatformInput::MouseMove(_) => "mouse_move",
+            PlatformInput::MouseExited(_) => "mouse_exited",
+            PlatformInput::ScrollWheel(_) => "scroll_wheel",
+            PlatformInput::Pinch(_) => "pinch",
+            PlatformInput::LongPress(_) => "long_press",
+            PlatformInput::TouchDrag(_) => "touch_drag",
+            PlatformInput::FileDrop(_) => "file_drop",
+            PlatformInput::ExternalDrop(_) => "external_drop",
+            PlatformInput::Touch(_) => "touch",
         }
     }
 
@@ -1055,6 +1165,30 @@ impl PlatformInput {
 
 #[cfg(test)]
 mod test {
+
+    #[test]
+    fn pointer_button_state_chords_and_cancellation_are_idempotent() {
+        use super::{MouseButton::*, PointerButtonState};
+        for remaining in [1, 2] {
+            let mut state = PointerButtonState::default();
+            assert_eq!(state.update(1), vec![(Left, true)]);
+            assert_eq!(state.update(3), vec![(Right, true)]);
+            assert!(state.update(3).is_empty());
+            assert_eq!(state.pressed_button(), Some(Left));
+            let released = if remaining == 1 { Right } else { Left };
+            let held = if remaining == 1 { Left } else { Right };
+            assert_eq!(state.update(remaining), vec![(released, false)]);
+            assert_eq!(state.pressed_button(), Some(held));
+            assert_eq!(state.update(0), vec![(held, false)]);
+            assert!(!state.cancel());
+            state.update(31);
+            assert!(state.cancel());
+            assert!(!state.cancel());
+            assert!(state.update(0).is_empty(), "cancel must not synthesize up");
+            assert_eq!(state.pressed_button(), None);
+            assert!(state.update(32).is_empty(), "unknown buttons are ignored");
+        }
+    }
 
     use crate::{
         self as gpui, AppContext as _, Context, ExternalDropData, ExternalFile, FocusHandle,

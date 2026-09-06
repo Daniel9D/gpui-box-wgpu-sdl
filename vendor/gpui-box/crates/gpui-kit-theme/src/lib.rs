@@ -1,5 +1,7 @@
 //! Maps GPUI-independent tokens into the paint and typography types views use.
 
+use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use gpui::{
@@ -151,6 +153,15 @@ struct PaletteSteps {
     readable_light: [String; 3],
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ResolvedRamp {
+    filled: Option<Hsla>,
+    hover: Option<Hsla>,
+    active: Option<Hsla>,
+    readable_dark: Option<Hsla>,
+    readable_light: Option<Hsla>,
+}
+
 fn token_color(paint: Hsla) -> Color {
     let paint = Rgba::from(paint);
     Color {
@@ -159,6 +170,48 @@ fn token_color(paint: Hsla) -> Color {
         blue: paint.b,
         alpha: paint.a,
     }
+}
+
+fn resolve_palette(
+    palette: &Palette,
+    steps: &PaletteSteps,
+) -> (
+    HashMap<SharedString, Hsla>,
+    HashMap<SharedString, ResolvedRamp>,
+) {
+    let resolved = palette
+        .iter()
+        .flat_map(|(group, entries)| {
+            entries.iter().filter_map(move |(step, value)| {
+                let path = format!("{group}.{step}");
+                Color::resolve(&path, value, palette)
+                    .ok()
+                    .map(|paint| (SharedString::from(path), color(paint)))
+            })
+        })
+        .collect::<HashMap<_, _>>();
+    let ramp_step = |group: &str, preferred: &[String; 3]| {
+        preferred.iter().find_map(|step| {
+            let path = format!("{group}.{step}");
+            resolved.get(path.as_str()).copied()
+        })
+    };
+    let ramps = palette
+        .keys()
+        .map(|group| {
+            (
+                SharedString::from(group.clone()),
+                ResolvedRamp {
+                    filled: ramp_step(group, &steps.filled),
+                    hover: ramp_step(group, &steps.hover),
+                    active: ramp_step(group, &steps.active),
+                    readable_dark: ramp_step(group, &steps.readable_dark),
+                    readable_light: ramp_step(group, &steps.readable_light),
+                },
+            )
+        })
+        .collect();
+    (resolved, ramps)
 }
 
 /// The weakest contrast `foreground` keeps over every interactive paint.
@@ -177,8 +230,29 @@ fn weakest_contrast(foreground: Hsla, backgrounds: [Hsla; 3], substrate: Hsla) -
         .fold(f32::INFINITY, f32::min)
 }
 
+/// A cheaply cloned handle to one complete resolved token document.
+///
+/// Render paths clone this handle without cloning the palette, shadows,
+/// strings, or sequence scale behind it. Use [`Theme::modify`] to derive an
+/// adjusted theme while keeping the original unchanged.
 #[derive(Debug, Clone)]
-pub struct Theme {
+pub struct Theme(Arc<ThemeData>);
+
+impl Deref for Theme {
+    type Target = ThemeData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// The complete resolved data behind a [`Theme`].
+///
+/// Its fields stay readable so existing component paint code remains direct.
+/// Mutations go through [`Theme::modify`], which uses copy-on-write and keeps
+/// the pre-resolved palette lookup tables coherent.
+#[derive(Debug, Clone)]
+pub struct ThemeData {
     pub id: SharedString,
     pub name: SharedString,
     pub appearance: Appearance,
@@ -199,10 +273,12 @@ pub struct Theme {
     /// vocabulary has no slot for still travels with the theme rather than
     /// being read from a second document the registry does not know about.
     ///
-    /// Read it through [`Theme::palette_color`]. Shared behind an `Arc`
-    /// because a theme is cloned on every render that reads it.
+    /// Read it through [`Theme::palette_color`]. It remains separately shared
+    /// so a rare copy-on-write theme adjustment need not clone the raw map.
     pub palette: Arc<Palette>,
     palette_steps: PaletteSteps,
+    resolved_palette: HashMap<SharedString, Hsla>,
+    resolved_ramps: HashMap<SharedString, ResolvedRamp>,
 }
 
 #[derive(Debug, Clone)]
@@ -469,6 +545,13 @@ pub struct Measures {
     pub media_viewer_height: f32,
     pub timeline_rail_width: f32,
     pub status_mark: f32,
+    pub node_edge_width: f32,
+    pub node_edge_corner: f32,
+    pub node_edge_lead: f32,
+    pub node_edge_corridor: f32,
+    pub node_edge_lane: f32,
+    pub node_port: f32,
+    pub node_progress: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -645,6 +728,8 @@ pub struct Effects {
     pub glass_contrast_flip_low: f32,
     pub glass_contrast_flip_high: f32,
     pub glass_press_depth: f32,
+    pub scroll_edge_band: f32,
+    pub scroll_edge_blur: f32,
     /// How strongly a raised surface catches light along its top edge. The
     /// gradient itself is composed by the component, the way [`Theme::glow`]
     /// composes a bloom from a colour and an alpha.
@@ -705,6 +790,181 @@ impl Theme {
         Self::from_tokens(gpui_kit_tokens::studio_light(), Density::default())
     }
 
+    /// Derives a theme by mutating a copy-on-write view of its resolved data.
+    ///
+    /// Cloning a theme is constant-time. The complete data is cloned only
+    /// when this method adjusts a shared theme; the source handle and every
+    /// other clone keep their original values. If the callback replaces or
+    /// copy-on-write mutates `palette`, its lookup tables are rebuilt before
+    /// the result is returned.
+    pub fn modify(mut self, adjust: impl FnOnce(&mut ThemeData)) -> Self {
+        let previous_palette = Arc::clone(&self.0.palette);
+        let data = Arc::make_mut(&mut self.0);
+        adjust(data);
+        if !Arc::ptr_eq(&previous_palette, &data.palette) {
+            let (resolved_palette, resolved_ramps) =
+                resolve_palette(&data.palette, &data.palette_steps);
+            data.resolved_palette = resolved_palette;
+            data.resolved_ramps = resolved_ramps;
+        }
+        self
+    }
+
+    /// The same theme with every drawn measurement taken at `factor` of its
+    /// size.
+    ///
+    /// This exists for one situation, and it is worth stating because the
+    /// obvious reading — a density knob a product can turn — is the wrong one.
+    /// Density is that, it is an axis of the document, and it is discrete.
+    /// This is for a container that draws its own chrome at a scale of its own
+    /// and then mounts content it did not build: a card on a zoomed canvas is
+    /// the case in this library. The card scales its type, its padding and its
+    /// ports; anything the caller seats in it is built from the theme in force
+    /// and comes out at full size, so at three-quarter zoom a mounted slider
+    /// is a third larger than the card's own controls. Handing the subtree a
+    /// scaled theme through [`crate`-level `ThemeOverlay`] is how the two are
+    /// made to agree, because GPUI Box has no transform for an element subtree
+    /// — `TransformationMatrix` reaches sprites alone — so the size has to be
+    /// in the tokens the subtree reads rather than in a matrix over its
+    /// pixels.
+    ///
+    /// Colour, opacity, motion, elevation and the effect alphas are untouched:
+    /// a control drawn smaller is the same control, and an animation does not
+    /// run at a different speed because the thing it moves shrank.
+    ///
+    /// The measures that size overlays and page regions are untouched too. A
+    /// menu, dialog or popover opened from inside the subtree is drawn against
+    /// the window rather than against the card, so scaling it would answer the
+    /// wrong question and produce a menu nobody can read.
+    pub fn scaled(self, factor: f32) -> Self {
+        if !factor.is_finite() || factor <= 0.0 || (factor - 1.0).abs() < f32::EPSILON {
+            return self;
+        }
+        self.modify(|data| {
+            let Spacing {
+                xxs,
+                xs,
+                sm,
+                md,
+                lg,
+                xl,
+                xxl,
+            } = &mut data.spacing;
+            for value in [xxs, xs, sm, md, lg, xl, xxl] {
+                *value *= factor;
+            }
+
+            let Radii {
+                small,
+                control,
+                card,
+                dialog,
+                bubble,
+                pill,
+            } = &mut data.radii;
+            for value in [small, control, card, dialog, bubble, pill] {
+                *value *= factor;
+            }
+
+            let Borders { hairline, thick } = &mut data.borders;
+            for value in [hairline, thick] {
+                *value *= factor;
+            }
+
+            let Control { xs, sm, md, lg } = &mut data.control;
+            for metrics in [xs, sm, md, lg] {
+                let ControlMetrics {
+                    height,
+                    padding_x,
+                    gap,
+                    font_size,
+                    icon_size,
+                } = metrics;
+                for value in [height, padding_x, gap, font_size, icon_size] {
+                    *value *= factor;
+                }
+            }
+
+            let Typography {
+                sans: _,
+                sans_fallback: _,
+                mono: _,
+                mono_fallback: _,
+                // A ratio, not a length.
+                readout_scale: _,
+                caption,
+                label,
+                body,
+                strong,
+                subtitle,
+                title,
+                code,
+            } = &mut data.typography;
+            for style in [caption, label, body, strong, subtitle, title, code] {
+                style.size *= factor;
+                style.line_height *= factor;
+            }
+
+            let Measures {
+                // Overlay and page geometry. These answer to the window, not
+                // to whatever the subtree is seated in.
+                readable_width: _,
+                dialog_width: _,
+                menu_min_width: _,
+                compact_menu_min_width: _,
+                menu_max_height: _,
+                compact_menu_max_height: _,
+                compact_overlay_width: _,
+                container_small: _,
+                container_medium: _,
+                container_large: _,
+                container_extra_large: _,
+                media_viewer_height: _,
+                // Component geometry: the size of a thing the subtree draws.
+                standalone_icon,
+                scrollbar_track,
+                scrollbar_thumb,
+                scrollbar_min_thumb,
+                caret_width,
+                text_decoration_width,
+                progress_track_height,
+                slider_track_height,
+                slider_vertical_height,
+                timeline_rail_width,
+                status_mark,
+                node_edge_width,
+                node_edge_corner,
+                node_edge_lead,
+                node_edge_corridor,
+                node_edge_lane,
+                node_port,
+                node_progress,
+            } = &mut data.measures;
+            for value in [
+                standalone_icon,
+                scrollbar_track,
+                scrollbar_thumb,
+                scrollbar_min_thumb,
+                caret_width,
+                text_decoration_width,
+                progress_track_height,
+                slider_track_height,
+                slider_vertical_height,
+                timeline_rail_width,
+                status_mark,
+                node_edge_width,
+                node_edge_corner,
+                node_edge_lead,
+                node_edge_corridor,
+                node_edge_lane,
+                node_port,
+                node_progress,
+            ] {
+                *value *= factor;
+            }
+        })
+    }
+
     /// Builds a theme from any validated token document at one density.
     ///
     /// Density scales spacing, control geometry and type independently, and
@@ -719,7 +979,16 @@ impl Theme {
                 weight: step.weight,
             }
         };
-        Self {
+        let palette = Arc::new(tokens.color.palette.clone());
+        let palette_steps = PaletteSteps {
+            filled: tokens.color.palette_steps.filled.clone(),
+            hover: tokens.color.palette_steps.hover.clone(),
+            active: tokens.color.palette_steps.active.clone(),
+            readable_dark: tokens.color.palette_steps.readable_dark.clone(),
+            readable_light: tokens.color.palette_steps.readable_light.clone(),
+        };
+        let (resolved_palette, resolved_ramps) = resolve_palette(&palette, &palette_steps);
+        Self(Arc::new(ThemeData {
             id: tokens.meta.id.clone().into(),
             name: tokens.meta.name.clone().into(),
             appearance: tokens.meta.appearance,
@@ -865,6 +1134,13 @@ impl Theme {
                 media_viewer_height: tokens.measure.media_viewer_height,
                 timeline_rail_width: tokens.measure.timeline_rail_width,
                 status_mark: tokens.measure.status_mark,
+                node_edge_width: tokens.measure.node_edge_width,
+                node_edge_corner: tokens.measure.node_edge_corner,
+                node_edge_lead: tokens.measure.node_edge_lead,
+                node_edge_corridor: tokens.measure.node_edge_corridor,
+                node_edge_lane: tokens.measure.node_edge_lane,
+                node_port: tokens.measure.node_port,
+                node_progress: tokens.measure.node_progress,
             },
             radii: Radii {
                 small: tokens.radius(Radius::Small),
@@ -983,6 +1259,8 @@ impl Theme {
                 glass_contrast_flip_low: tokens.effect.glass_contrast_flip_low,
                 glass_contrast_flip_high: tokens.effect.glass_contrast_flip_high,
                 glass_press_depth: tokens.effect.glass_press_depth,
+                scroll_edge_band: tokens.effect.scroll_edge_band,
+                scroll_edge_blur: tokens.effect.scroll_edge_blur,
                 sheen_alpha: tokens.effect.sheen_alpha,
                 area_wash_alpha: tokens.effect.area_wash_alpha,
                 header_tint_alpha: tokens.effect.header_tint_alpha,
@@ -1031,15 +1309,11 @@ impl Theme {
                     .effect
                     .custom_color_active_lightness_delta,
             },
-            palette: Arc::new(tokens.color.palette.clone()),
-            palette_steps: PaletteSteps {
-                filled: tokens.color.palette_steps.filled.clone(),
-                hover: tokens.color.palette_steps.hover.clone(),
-                active: tokens.color.palette_steps.active.clone(),
-                readable_dark: tokens.color.palette_steps.readable_dark.clone(),
-                readable_light: tokens.color.palette_steps.readable_light.clone(),
-            },
-        }
+            palette,
+            palette_steps,
+            resolved_palette,
+            resolved_ramps,
+        }))
     }
 
     /// A palette entry, addressed as `"group.step"`.
@@ -1055,9 +1329,7 @@ impl Theme {
     /// guessed colour: a theme that has not named a scale has not agreed to
     /// paint it.
     pub fn palette_color(&self, path: &str) -> Option<Hsla> {
-        let (group, step) = path.split_once('.')?;
-        let value = self.palette.get(group)?.get(step)?;
-        Color::resolve(path, value, &self.palette).ok().map(color)
+        self.resolved_palette.get(path).copied()
     }
 
     pub fn surface(&self, surface: Surface) -> Hsla {
@@ -1097,6 +1369,17 @@ impl Theme {
     /// A semantic colour used as a background without becoming a solid fill.
     pub fn semantic_wash(&self, color: SemanticColor, strength: SemanticWash) -> Hsla {
         self.color_wash(self.semantic_color(color), strength)
+    }
+
+    /// A wash resolved against the surface it is tinting, as one opaque fill.
+    ///
+    /// A wash is translucent by construction, so painting one *as* a surface
+    /// leaves a hole rather than a tint: the page reads through it, and so
+    /// does the drop shadow an elevated surface casts under its own footprint.
+    /// A surface that means to lean towards a colour asks for this, and gets a
+    /// single fill it can still be read against.
+    pub fn washed_surface(&self, surface: Surface, wash: Hsla) -> Hsla {
+        self.surface(surface).blend(wash)
     }
 
     /// A caller-owned colour used as a background without becoming a solid
@@ -1336,6 +1619,14 @@ impl Theme {
     /// is the one surface it never touches; choosing a colour legible against
     /// the fill picks for a surface the ring is never drawn on.
     ///
+    /// A field is the case that reads as the exception and is not one. A field
+    /// paints a well, so `theme.surface(Surface::Sunken)` is the obvious thing
+    /// to hand this — and it is exactly the mistake above, because the well is
+    /// the fill and the ring is drawn outside it, on the form. Every field in
+    /// this library therefore takes [`Self::focus_ring`] and the page ground.
+    /// Reach for this one only when the ring will genuinely be cast onto
+    /// something other than the page.
+    ///
     /// That distinction used to be academic, because the halo was a drop
     /// shadow painted under the element as well as around it. It stopped being
     /// academic the moment the element was cut out of it: a primary button
@@ -1456,7 +1747,8 @@ impl Theme {
             ColorChoice::Semantic(role) => self.semantic_color(*role),
             ColorChoice::Custom(paint) => *paint,
             ColorChoice::Palette(group) => self
-                .ramp_step(group, &self.palette_steps.filled)
+                .ramp_step(group)
+                .and_then(|ramp| ramp.filled)
                 .unwrap_or(self.colors.accent),
         }
     }
@@ -1464,11 +1756,11 @@ impl Theme {
     /// The shade of the colour that reads as text on this theme's surfaces.
     fn readable_shade(&self, color: &ColorChoice, base: Hsla) -> Hsla {
         if let ColorChoice::Palette(group) = color {
-            let steps = match self.appearance {
-                Appearance::Dark => &self.palette_steps.readable_dark,
-                Appearance::Light => &self.palette_steps.readable_light,
+            let shade = match self.appearance {
+                Appearance::Dark => self.ramp_step(group).and_then(|ramp| ramp.readable_dark),
+                Appearance::Light => self.ramp_step(group).and_then(|ramp| ramp.readable_light),
             };
-            if let Some(shade) = self.ramp_step(group, steps) {
+            if let Some(shade) = shade {
                 return shade;
             }
         }
@@ -1487,10 +1779,8 @@ impl Theme {
     /// The hover and pressed shades of a filled colour.
     fn pressed_shades(&self, color: &ColorChoice, base: Hsla) -> (Hsla, Hsla) {
         if let ColorChoice::Palette(group) = color
-            && let (Some(hover), Some(active)) = (
-                self.ramp_step(group, &self.palette_steps.hover),
-                self.ramp_step(group, &self.palette_steps.active),
-            )
+            && let Some(ramp) = self.ramp_step(group)
+            && let (Some(hover), Some(active)) = (ramp.hover, ramp.active)
         {
             return (hover, active);
         }
@@ -1506,17 +1796,9 @@ impl Theme {
         )
     }
 
-    /// The first step of `preferred` the active palette carries for `group`.
-    fn ramp_step(&self, group: &str, preferred: &[String]) -> Option<Hsla> {
-        let steps = self.palette.get(group)?;
-        preferred
-            .iter()
-            .find_map(|step| steps.get(step).map(|value| (step.as_str(), value.as_str())))
-            .and_then(|(step, value)| {
-                Color::resolve(&format!("{group}.{step}"), value, &self.palette)
-                    .ok()
-                    .map(color)
-            })
+    /// The pre-resolved presentation ramp the active palette carries for `group`.
+    fn ramp_step(&self, group: &str) -> Option<&ResolvedRamp> {
+        self.resolved_ramps.get(group)
     }
 
     /// The colour a surface in a named state bleeds into the pixels around it.
@@ -1642,6 +1924,36 @@ impl ThemeRegistry {
     /// Returns false when the id is not registered, leaving the active theme
     /// untouched rather than falling back to a default the caller did not ask
     /// for.
+    /// The registered theme of the opposite appearance, if one exists.
+    ///
+    /// Prefers an id that is this theme's id with `-dark` / `-light` swapped,
+    /// then any other document of the opposite appearance. A product that
+    /// registered only one appearance has no counterpart, which a glass
+    /// surface treats as "do not flip".
+    pub fn counterpart(&self) -> Option<Theme> {
+        self.counterpart_for(&self.theme)
+    }
+
+    /// The opposite appearance of `theme`, resolved from this registry.
+    pub fn counterpart_for(&self, theme: &Theme) -> Option<Theme> {
+        let want = match theme.appearance {
+            Appearance::Dark => Appearance::Light,
+            Appearance::Light => Appearance::Dark,
+        };
+        let current_id = theme.id.as_ref();
+        let paired = counterpart_id(current_id);
+        let preferred = self
+            .tokens
+            .iter()
+            .find(|document| document.meta.id == paired && document.meta.appearance == want);
+        let found = preferred.or_else(|| {
+            self.tokens
+                .iter()
+                .find(|document| document.meta.appearance == want && document.meta.id != current_id)
+        })?;
+        Some(Theme::from_tokens(found, self.density))
+    }
+
     pub fn activate(&mut self, id: &str) -> bool {
         let Some(index) = self.tokens.iter().position(|tokens| tokens.meta.id == id) else {
             return false;
@@ -1664,6 +1976,16 @@ impl ThemeRegistry {
 impl Default for ThemeRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn counterpart_id(id: &str) -> String {
+    if let Some(stem) = id.strip_suffix("-dark") {
+        format!("{stem}-light")
+    } else if let Some(stem) = id.strip_suffix("-light") {
+        format!("{stem}-dark")
+    } else {
+        id.to_string()
     }
 }
 
@@ -1807,6 +2129,51 @@ mod tests {
     }
 
     #[test]
+    fn scaling_shrinks_what_a_subtree_draws_and_leaves_the_window_alone() {
+        let full = Theme::studio_dark();
+        let half = full.clone().scaled(0.5);
+
+        // What a control seated in the scaled subtree is built from.
+        assert_eq!(
+            half.control.get(ControlSize::Md).icon_size,
+            full.control.get(ControlSize::Md).icon_size * 0.5
+        );
+        assert_eq!(
+            half.measures.slider_track_height,
+            full.measures.slider_track_height * 0.5
+        );
+        assert_eq!(half.measures.node_port, full.measures.node_port * 0.5);
+        assert_eq!(half.spacing.md, full.spacing.md * 0.5);
+        assert_eq!(
+            half.typography.caption.size,
+            full.typography.caption.size * 0.5
+        );
+        assert_eq!(half.radii.card, full.radii.card * 0.5);
+
+        // A menu or dialog opened from inside it is drawn against the window.
+        assert_eq!(half.measures.menu_min_width, full.measures.menu_min_width);
+        assert_eq!(half.measures.dialog_width, full.measures.dialog_width);
+        assert_eq!(half.measures.readable_width, full.measures.readable_width);
+
+        // Scaling is a size, not a restyle.
+        assert_eq!(half.colors.accent, full.colors.accent);
+        assert_eq!(half.effects.focus_ring_alpha, full.effects.focus_ring_alpha);
+    }
+
+    #[test]
+    fn scaling_by_one_or_by_nonsense_returns_the_same_theme() {
+        let theme = Theme::studio_dark();
+        for factor in [1.0, 0.0, -2.0, f32::NAN, f32::INFINITY] {
+            let same = theme.clone().scaled(factor);
+            assert_eq!(
+                same.control.get(ControlSize::Md).height,
+                theme.control.get(ControlSize::Md).height,
+                "factor {factor} must not change geometry"
+            );
+        }
+    }
+
+    #[test]
     fn density_keeps_geometry_on_the_pixel_grid() {
         let compact = Theme::from_tokens(gpui_kit_tokens::studio_dark(), Density::Compact);
         for size in ControlSize::ALL {
@@ -1815,6 +2182,33 @@ mod tests {
             assert_eq!(metrics.padding_x.fract(), 0.0);
         }
         assert_eq!(compact.spacing.md.fract(), 0.0);
+    }
+
+    #[test]
+    fn clones_share_data_until_an_adjustment_writes() {
+        let theme = Theme::studio_dark();
+        let clone = theme.clone();
+        assert!(Arc::ptr_eq(&theme.0, &clone.0));
+
+        let adjusted = clone.modify(|theme| theme.spacing.lg *= 3.0);
+        assert!(!Arc::ptr_eq(&theme.0, &adjusted.0));
+        assert_eq!(adjusted.spacing.lg, theme.spacing.lg * 3.0);
+        assert_eq!(theme.spacing.lg, Theme::studio_dark().spacing.lg);
+    }
+
+    #[test]
+    fn modifying_the_palette_rebuilds_resolved_lookups() {
+        let theme = Theme::studio_dark();
+        let adjusted = theme.clone().modify(|theme| {
+            Arc::make_mut(&mut theme.palette)
+                .get_mut("indigo")
+                .expect("bundled ramp")
+                .insert("400".into(), "#ff00ff".into());
+        });
+        let magenta = color(Color::parse("test", "#ff00ff").expect("literal"));
+
+        assert_eq!(adjusted.palette_color("indigo.400"), Some(magenta));
+        assert_ne!(theme.palette_color("indigo.400"), Some(magenta));
     }
 
     #[test]
@@ -1945,6 +2339,18 @@ mod tests {
     }
 
     #[test]
+    fn the_registry_names_the_opposite_appearance() {
+        let mut registry = ThemeRegistry::new();
+        let light = registry.counterpart().expect("studio-light is bundled");
+        assert_eq!(light.id, "studio-light");
+        assert_eq!(light.appearance, Appearance::Light);
+        assert!(registry.activate("studio-light"));
+        let dark = registry.counterpart().expect("studio-dark is bundled");
+        assert_eq!(dark.id, "studio-dark");
+        assert_eq!(dark.appearance, Appearance::Dark);
+    }
+
+    #[test]
     fn every_shipped_theme_is_registered_and_the_studio_dark_one_is_active() {
         let registry = ThemeRegistry::new();
         assert_eq!(registry.active().id, "studio-dark");
@@ -2072,6 +2478,49 @@ mod tests {
                 assert_eq!(shadows.len(), 2, "{level:?}");
                 assert!(shadows[0].blur_radius < shadows[1].blur_radius);
                 assert!(shadows[0].offset.y < shadows[1].offset.y);
+            }
+        }
+    }
+
+    /// A tinted panel is still a panel, in every theme that ships one.
+    ///
+    /// The failure of this invariant is invisible in a dark appearance and
+    /// ruinous in a light one: a panel painted with the wash alone shows its
+    /// own raised shadow through itself, so the light themes are the ones that
+    /// prove the composite happened.
+    #[test]
+    fn a_washed_surface_stays_an_opaque_ground() {
+        for tokens in presets() {
+            let theme = Theme::from_tokens(tokens, Density::default());
+            for color in [
+                SemanticColor::Danger,
+                SemanticColor::Warning,
+                SemanticColor::Success,
+                SemanticColor::Info,
+            ] {
+                for strength in [
+                    SemanticWash::Faint,
+                    SemanticWash::Standard,
+                    SemanticWash::Strong,
+                ] {
+                    let wash = theme.semantic_wash(color, strength);
+                    let washed = theme.washed_surface(Surface::Panel, wash);
+                    assert!(wash.a < 1.0, "{} {color:?} {strength:?}", tokens.meta.id);
+                    assert_eq!(washed.a, 1.0, "{} {color:?} {strength:?}", tokens.meta.id);
+                    assert_ne!(
+                        washed,
+                        theme.surface(Surface::Panel),
+                        "{} {color:?} {strength:?}",
+                        tokens.meta.id
+                    );
+                    // The sentence inside a tinted panel is the reason the
+                    // panel exists, so the tint may not cost it its reading.
+                    assert!(
+                        theme.contrast(theme.colors.text, washed) >= 4.5,
+                        "{} {color:?} {strength:?}",
+                        tokens.meta.id
+                    );
+                }
             }
         }
     }

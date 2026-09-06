@@ -430,6 +430,7 @@ impl EventEmitter<SchemaFormEvent> for SchemaForm {}
 
 struct SelectedFile {
     id: u64,
+    ident: Ident,
     path: PathBuf,
     label: SharedString,
 }
@@ -444,6 +445,7 @@ struct FilesControl {
 
 struct RepeatedItem {
     id: u64,
+    ident: Ident,
     form: Entity<SchemaForm>,
     _subscription: Subscription,
 }
@@ -471,7 +473,10 @@ enum Control {
     Repeated(RepeatedControl),
     /// A heading over the fields beneath it. It holds nothing.
     Group,
+    /// A caller-owned reason that must stay visible.
     Unrenderable(SharedString),
+    /// A Kit mechanism explained by a warning mark rather than a sentence.
+    Unsupported(SharedString),
 }
 
 /// One field, flattened out of however many objects it sat inside.
@@ -572,7 +577,7 @@ impl SchemaForm {
             let label = field.shown_label();
             let control = self.control_for(field, &path, &field_ident, window, cx);
 
-            if let Control::Unrenderable(reason) = &control {
+            if let Control::Unrenderable(reason) | Control::Unsupported(reason) = &control {
                 self.unrenderable.push(UnrenderableField {
                     path: path.clone(),
                     label: label.clone(),
@@ -616,7 +621,7 @@ impl SchemaForm {
             // drawing an empty menu would look like a list that had not
             // loaded. The form refuses this one itself.
             SchemaKind::Enum(choices) | SchemaKind::OpenEnum(choices) if choices.is_empty() => {
-                Control::Unrenderable(cx.strings().text(StringKey::SchemaNoChoices))
+                Control::Unsupported(cx.strings().text(StringKey::SchemaNoChoices))
             }
             SchemaKind::Object(_) => Control::Group,
             SchemaKind::Text {
@@ -707,7 +712,7 @@ impl SchemaForm {
                     self.watch_date(path, &input, cx);
                     Control::Date(input)
                 }
-                None => Control::Unrenderable(cx.strings().text(StringKey::SchemaNeedsAdapter)),
+                None => Control::Unsupported(cx.strings().text(StringKey::SchemaNeedsAdapter)),
             },
             SchemaKind::Time => match installed_adapter(cx) {
                 Some(adapter) => {
@@ -715,7 +720,7 @@ impl SchemaForm {
                     self.watch_time(path, &input, cx);
                     Control::Time(input)
                 }
-                None => Control::Unrenderable(cx.strings().text(StringKey::SchemaNeedsAdapter)),
+                None => Control::Unsupported(cx.strings().text(StringKey::SchemaNeedsAdapter)),
             },
             SchemaKind::DateRange => match installed_adapter(cx) {
                 Some(adapter) => {
@@ -723,7 +728,7 @@ impl SchemaForm {
                     self.watch_range(path, &picker, cx);
                     Control::DateRange(picker)
                 }
-                None => Control::Unrenderable(cx.strings().text(StringKey::SchemaNeedsAdapter)),
+                None => Control::Unsupported(cx.strings().text(StringKey::SchemaNeedsAdapter)),
             },
             SchemaKind::Files { max } => match installed_schema_file_policy(cx) {
                 Some(policy) => Control::Files(FilesControl {
@@ -737,7 +742,7 @@ impl SchemaForm {
                     next_id: 0,
                     refusal: None,
                 }),
-                None => Control::Unrenderable(cx.strings().text(StringKey::SchemaNeedsHost)),
+                None => Control::Unsupported(cx.strings().text(StringKey::SchemaNeedsHost)),
             },
             SchemaKind::List { item, max } => Control::Repeated(RepeatedControl {
                 item: item.as_ref().clone(),
@@ -925,6 +930,11 @@ impl SchemaForm {
         append: bool,
         cx: &mut Context<Self>,
     ) -> Result<bool, SharedString> {
+        let file_root = self
+            .ident
+            .child(path.as_ref())
+            .child("control")
+            .child("file");
         let Some(field) = self.fields.iter().find(|field| field.path == *path) else {
             return Ok(false);
         };
@@ -982,17 +992,25 @@ impl SchemaForm {
         let previous = files
             .selected
             .iter()
-            .map(|file| (file.path.clone(), file.id, file.label.clone()))
+            .map(|file| {
+                (
+                    file.path.clone(),
+                    file.id,
+                    file.label.clone(),
+                    file.ident.clone(),
+                )
+            })
             .collect::<Vec<_>>();
         let mut next_id = files.next_id;
         let selected = candidates
             .into_iter()
             .map(|candidate| {
-                if let Some((_, id, label)) =
-                    previous.iter().find(|(path, _, _)| path == &candidate)
+                if let Some((_, id, label, ident)) =
+                    previous.iter().find(|(path, _, _, _)| path == &candidate)
                 {
                     SelectedFile {
                         id: *id,
+                        ident: ident.clone(),
                         path: candidate,
                         label: label.clone(),
                     }
@@ -1002,6 +1020,7 @@ impl SchemaForm {
                     let label = policy.display_name(&candidate);
                     SelectedFile {
                         id,
+                        ident: file_root.child(id.to_string()),
                         path: candidate,
                         label,
                     }
@@ -1012,7 +1031,7 @@ impl SchemaForm {
             || previous
                 .iter()
                 .zip(&selected)
-                .any(|((path, _, _), selected)| path != &selected.path);
+                .any(|((path, _, _, _), selected)| path != &selected.path);
 
         if let Some(field) = self.fields.iter_mut().find(|field| field.path == *path)
             && let Control::Files(files) = &mut field.control
@@ -1106,6 +1125,7 @@ impl SchemaForm {
             .child("control")
             .child(format!("item-{id}"));
         let schema = Self::repeated_schema(&item);
+        let retained_ident = item_ident.clone();
         let form = cx.new(|cx| SchemaForm::new(item_ident, schema, window, cx));
         let export_prefix = Self::exported_path(
             self.export_prefix.as_ref(),
@@ -1134,6 +1154,7 @@ impl SchemaForm {
         {
             repeated.items.push(RepeatedItem {
                 id,
+                ident: retained_ident,
                 form,
                 _subscription: subscription,
             });
@@ -1700,7 +1721,8 @@ impl SchemaForm {
                 Control::Boolean(_)
                 | Control::Files(_)
                 | Control::Group
-                | Control::Unrenderable(_) => {}
+                | Control::Unrenderable(_)
+                | Control::Unsupported(_) => {}
             }
         }
         cx.notify();
@@ -1767,7 +1789,7 @@ impl SchemaForm {
                     .collect(),
             ),
             Control::Repeated(repeated) => FieldValue::ItemCount(repeated.items.len()),
-            Control::Unrenderable(_) => FieldValue::Unrenderable,
+            Control::Unrenderable(_) | Control::Unsupported(_) => FieldValue::Unrenderable,
             Control::Group => FieldValue::Absent,
         }
     }
@@ -1869,7 +1891,7 @@ impl SchemaForm {
             .filter(|field| self.field_is_visible(field))
         {
             match &field.control {
-                Control::Unrenderable(_) => {
+                Control::Unrenderable(_) | Control::Unsupported(_) => {
                     count += 1;
                     required |= field.required;
                 }
@@ -2020,6 +2042,14 @@ impl Render for SchemaForm {
                 let ident = self.ident.child("unrenderable");
                 element.child(
                     div()
+                        .id(ident.element_id())
+                        // The same callout the form's own refusal takes. This
+                        // used to be the bare mark with the reason on a tip,
+                        // which is a status nobody is told: the one thing a
+                        // reader needs here is which fields the form cannot
+                        // draw and why, and an unlabelled glyph they have to
+                        // find and hover does not say it. Hover is where a
+                        // detail goes, not where the sentence goes.
                         .child(
                             Callout::new(
                                 summary.clone(),
@@ -2035,7 +2065,7 @@ impl Render for SchemaForm {
                             cx,
                             NodeSpec::new(ident.semantic_id(), Role::Status)
                                 .parent(self.ident.semantic_id())
-                                .text(summary)
+                                .description(summary)
                                 .invalid(true)
                                 .required(unrenderable_required)
                                 .value(if unrenderable_required {
@@ -2091,13 +2121,22 @@ impl SchemaForm {
         let control_ident = ident.child("control");
         let validation = self.validation_for(field, cx);
         let invalid = validation.is_invalid();
-        let mut form_field = FormField::new(ident.clone(), field.label.clone())
+        let form_field = FormField::new(ident.clone(), field.label.clone())
             .control(control_ident.semantic_id())
             .required(field.required)
             .validation(validation);
-        if let Some(description) = field.description.clone() {
-            form_field = form_field.description(description);
-        }
+        let description = field.description.clone().map(|description| {
+            div()
+                .semantic_in(
+                    cx,
+                    NodeSpec::new(ident.child("description").semantic_id(), Role::Text)
+                        .parent(ident.semantic_id())
+                        .text(description.clone())
+                        .description(description)
+                        .describes(control_ident.semantic_id()),
+                )
+                .into_any_element()
+        });
         let body: AnyElement = match &field.control {
             Control::Text(input) => input.clone().into_any_element(),
             Control::Number(number) => number.clone().into_any_element(),
@@ -2114,7 +2153,6 @@ impl SchemaForm {
                     control_ident.child("dropzone"),
                     cx.strings().text(StringKey::SchemaFilesDrop),
                 )
-                .hint(cx.strings().text(StringKey::SchemaFilesDropHint))
                 .invalid(invalid)
                 .disabled(self.disabled)
                 .when(!self.disabled, |dropzone| {
@@ -2149,10 +2187,7 @@ impl SchemaForm {
                     let path = field.path.clone();
                     let id = selected.id;
                     div()
-                        .id(control_ident
-                            .child("file")
-                            .child(id.to_string())
-                            .element_id())
+                        .id(selected.ident.element_id())
                         .row_reading(direction)
                         .items_center()
                         .justify_between()
@@ -2172,10 +2207,7 @@ impl SchemaForm {
                         )
                         .child(
                             IconButton::new(
-                                control_ident
-                                    .child("file")
-                                    .child(id.to_string())
-                                    .child("remove"),
+                                selected.ident.child("remove"),
                                 Icon::Trash,
                                 cx.strings().text(StringKey::SchemaFilesRemove),
                             )
@@ -2213,7 +2245,7 @@ impl SchemaForm {
             Control::Repeated(repeated) => {
                 let item_count = repeated.items.len();
                 let items = repeated.items.iter().enumerate().map(|(index, item)| {
-                    let item_ident = control_ident.child(format!("item-{}", item.id));
+                    let item_ident = item.ident.clone();
 
                     let form = cx.entity().downgrade();
                     let path = field.path.clone();
@@ -2385,10 +2417,47 @@ impl SchemaForm {
                     )
                     .into_any_element()
             }
+            Control::Unsupported(reason) => {
+                let refusal = ident.child("unrenderable");
+                div()
+                    .id(refusal.element_id())
+                    // A field the form cannot draw stands where its control
+                    // would have, and says why in the place the control would
+                    // have occupied. A mark alone leaves a labelled field with
+                    // an empty body and the explanation behind a hover.
+                    .child(
+                        Callout::new(
+                            reason.clone(),
+                            if field.required {
+                                Tone::Danger
+                            } else {
+                                Tone::Warning
+                            },
+                        )
+                        .id(refusal.child("callout")),
+                    )
+                    .semantic_in(
+                        cx,
+                        NodeSpec::new(refusal.semantic_id(), Role::Status)
+                            .parent(ident.semantic_id())
+                            .description(reason.clone())
+                            .invalid(true)
+                            .required(field.required)
+                            .value(if field.required {
+                                "unrenderable, required"
+                            } else {
+                                "unrenderable"
+                            }),
+                    )
+                    .into_any_element()
+            }
             Control::Group => div().into_any_element(),
         };
 
-        div().child(form_field.child(body)).into_any_element()
+        div()
+            .child(form_field.child(body))
+            .children(description)
+            .into_any_element()
     }
 }
 

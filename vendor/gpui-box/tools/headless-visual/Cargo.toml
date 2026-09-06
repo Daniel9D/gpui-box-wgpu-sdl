@@ -1,0 +1,63 @@
+# The headless visual gate: the scene catalog rendered and compared without a
+# window system on supported macOS, Linux, and Windows hosts.
+#
+# macOS renders through Metal, Linux through llvmpipe, and Windows through WARP.
+#
+# This package is deliberately its own workspace because its renderer
+# dependencies and lockfile are platform-specific. It consumes the same local
+# GPUI Box packages as the root workspace.
+
+[package]
+name = "gpui-box-headless-visual"
+publish = false
+edition = "2024"
+version = "0.1.2"
+license = "MIT"
+repository = "https://github.com/fran0220/gpui-box"
+
+[dependencies]
+anyhow = "1"
+# The same major version GPUI's `render_to_image` returns, so the image value
+# crosses the crate boundary as one type. The harness itself only reads and
+# writes PNG; do not pull the image crate's AVIF encoder into this workspace.
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = "1"
+gpui = { package = "gpui-box", path = "../../crates/gpui", version = "0.1.2", features = ["test-support"] }
+gpui-kit = { package = "gpui-box-kit", path = "../../crates/gpui-kit", version = "0.1.2", default-features = false, features = ["fixtures", "terminal"] }
+gpui-kit-semantics = { package = "gpui-box-kit-semantics", path = "../../crates/gpui-kit-semantics", version = "0.1.2" }
+gpui-kit-testkit = { package = "gpui-box-kit-testkit", path = "../../crates/gpui-kit-testkit", version = "0.1.2" }
+gpui-kit-theme = { package = "gpui-box-kit-theme", path = "../../crates/gpui-kit-theme", version = "0.1.2" }
+
+# `gpui_platform` supplies the headless renderer each platform actually ships:
+# Metal on macOS, wgpu elsewhere. `gpui_wgpu` additionally supplies the
+# bundled-font text system, which every platform uses so that shaping cannot
+# vary with the machine's installed fonts.
+gpui_platform = { package = "gpui-box-platform", path = "../../crates/gpui_platform", version = "0.1.2", default-features = false, features = ["test-support"] }
+gpui_wgpu = { package = "gpui-box-wgpu", path = "../../crates/gpui_wgpu", version = "0.1.2", features = ["test-support"] }
+
+[workspace]
+
+# Match the root workspace's audited compatibility fork so the independent
+# visual lockfile resolves exactly the same framework dependency graph.
+[patch.crates-io]
+block = { path = "../../vendor/block" }
+
+# A baseline capture must encode every frame. Keep the harness itself in a
+# source-located dev profile while compiling only its PNG compression path with
+# optimization; this workspace does not inherit the root workspace's profiles.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3

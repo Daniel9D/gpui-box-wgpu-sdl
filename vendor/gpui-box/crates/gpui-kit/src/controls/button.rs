@@ -2,15 +2,16 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, Div, FocusHandle, Hsla, InteractiveElement, IntoElement, ParentElement,
-    RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window, div,
+    RenderOnce, Rgba, SharedString, StatefulInteractiveElement, Styled, Window, div,
     prelude::FluentBuilder, px,
 };
 use gpui_kit_assets::Icon;
 use gpui_kit_semantics::{NodeSpec, Role, Semantic};
 use gpui_kit_theme::{
-    ActiveTheme, ColorChoice, ControlMetrics, ControlSize, Radius, SemanticColor, Theme, TypeScale,
-    Variant, VariantColors,
+    ActiveTheme, ColorChoice, ControlMetrics, ControlSize, Radius, SemanticColor, Surface, Theme,
+    TypeScale, Variant, VariantColors,
 };
+use gpui_kit_tokens::{Color, contrast::SEPARATION_MINIMUM};
 
 use crate::display::icon::{Icon as IconView, IconTone, flips, paint as paint_icon};
 use crate::foundation::direction::{ActiveDirection, DirectionalExt, LayoutDirection};
@@ -97,6 +98,7 @@ pub struct Button {
     variant: ButtonVariant,
     tier: Option<Variant>,
     color: Option<ColorChoice>,
+    ground: Surface,
     size: ControlSize,
     disabled: bool,
     selected: bool,
@@ -143,6 +145,7 @@ impl Button {
             variant: ButtonVariant::default(),
             tier: None,
             color: None,
+            ground: Surface::Panel,
             size: ControlSize::default(),
             disabled: false,
             selected: false,
@@ -227,6 +230,18 @@ impl Button {
         self
     }
 
+    /// The surface this control stands on.
+    ///
+    /// A neutral button normally takes the raised surface step above a panel.
+    /// When that step does not clear the theme's surface-separation floor over
+    /// the ground named here, it uses the shared light-tier neutral wash
+    /// instead. The default remains [`Surface::Panel`], preserving the paint
+    /// of buttons built before this setting existed.
+    pub fn ground(mut self, ground: Surface) -> Self {
+        self.ground = ground;
+        self
+    }
+
     /// The shared paint set, when this button opted into the shared tiers.
     fn unified(&self, theme: &Theme) -> Option<(Variant, VariantColors)> {
         if self.tier.is_none() && self.color.is_none() {
@@ -243,7 +258,11 @@ impl Button {
             ButtonVariant::Danger => ColorChoice::Semantic(gpui_kit_theme::SemanticColor::Danger),
             _ => ColorChoice::Semantic(gpui_kit_theme::SemanticColor::Accent),
         });
-        Some((tier, theme.variant_colors(tier, &color)))
+        let colors = match tier {
+            Variant::Default => neutral_colors_on(theme, self.ground),
+            _ => theme.variant_colors(tier, &color),
+        };
+        Some((tier, colors))
     }
 
     pub fn primary(self) -> Self {
@@ -444,44 +463,36 @@ impl RenderOnce for Button {
             }
         }
 
-        let mut button = frame(
-            &theme,
-            self.variant,
-            unified,
-            metrics,
-            self.disabled,
-            self.loading,
-            direction,
-        )
-        .group(hover_group)
-        .when(self.icon_only, |element| {
-            element.w(px(metrics.height)).px(px(0.0))
-        })
-        .map(|element| joined(element, self.join, direction))
-        .when(self.selected && !self.disabled, |element| {
-            element.bg(selected_fill_for(&theme, unified))
-        })
-        .id(self.ident.element_id())
-        .when_some(self.focus_handle.clone(), |element, handle| {
-            element.track_focus(&handle)
-        })
-        .role(gpui::Role::Button)
-        .when(self.full_width, |element| element.w_full())
-        .when(actionable, |element| {
-            element
-                .cursor_pointer()
-                .tab_index(0)
-                // Against the page, not against the button's own fill. The
-                // halo is cast outside the button, so the fill is the one
-                // surface it never lands on — and a primary button's fill is
-                // the accent, which is the focus colour, so asking for a pole
-                // readable on it returned near-black on a dark theme and pure
-                // white on a light one. Both were drawn onto a dialog of very
-                // nearly that colour and could not be seen at all.
-                .focus_ring(&theme)
-                .pressable(cx)
-        })
-        .children(content);
+        let mut button = frame(&theme, &self, unified, metrics, direction)
+            .group(hover_group)
+            .when(self.icon_only, |element| {
+                element.w(px(metrics.height)).px(px(0.0))
+            })
+            .map(|element| joined(element, self.join, direction))
+            .when(self.selected && !self.disabled, |element| {
+                element.bg(selected_fill_for(&theme, unified))
+            })
+            .id(self.ident.element_id())
+            .when_some(self.focus_handle.clone(), |element, handle| {
+                element.track_focus(&handle)
+            })
+            .role(gpui::Role::Button)
+            .when(self.full_width, |element| element.w_full())
+            .when(actionable, |element| {
+                element
+                    .cursor_pointer()
+                    .tab_index(0)
+                    // Against the page, not against the button's own fill. The
+                    // halo is cast outside the button, so the fill is the one
+                    // surface it never lands on — and a primary button's fill is
+                    // the accent, which is the focus colour, so asking for a pole
+                    // readable on it returned near-black on a dark theme and pure
+                    // white on a light one. Both were drawn onto a dialog of very
+                    // nearly that colour and could not be seen at all.
+                    .focus_ring(&theme)
+                    .pressable(cx)
+            })
+            .children(content);
 
         if let (true, Some(handler)) = (actionable, self.on_click.clone()) {
             let on_click = Rc::clone(&handler);
@@ -563,13 +574,40 @@ fn foreground(theme: &Theme, variant: ButtonVariant) -> Hsla {
     }
 }
 
+/// The neutral control tier resolved against the surface that actually holds
+/// it.
+///
+/// `raised` remains the normal answer wherever it gains the same CIE L* floor
+/// required of authored surface nestings. If a theme has no room for that
+/// step — most visibly an overlay at a light theme's white ceiling — the
+/// shared Light recipe supplies a text-coloured wash whose resting, hover and
+/// active strengths remain on the theme's existing tier ladder.
+fn neutral_colors_on(theme: &Theme, ground: Surface) -> VariantColors {
+    let default = theme.variant_colors(Variant::Default, &ColorChoice::Custom(theme.colors.text));
+    let raised = token_color(theme.colors.raised).lightness();
+    let behind = token_color(theme.surface(ground)).lightness();
+    if raised - behind >= SEPARATION_MINIMUM {
+        default
+    } else {
+        theme.variant_colors(Variant::Light, &ColorChoice::Custom(theme.colors.text))
+    }
+}
+
+fn token_color(paint: Hsla) -> Color {
+    let paint = Rgba::from(paint);
+    Color {
+        red: paint.r,
+        green: paint.g,
+        blue: paint.b,
+        alpha: paint.a,
+    }
+}
+
 fn frame(
     theme: &Theme,
-    variant: ButtonVariant,
+    button: &Button,
     unified: Option<(Variant, VariantColors)>,
     metrics: ControlMetrics,
-    disabled: bool,
-    loading: bool,
     direction: LayoutDirection,
 ) -> Div {
     // Leading and trailing are named for reading order, not for the screen,
@@ -585,29 +623,32 @@ fn frame(
         .radius(theme, Radius::Control)
         // No variant carries an outline any more, so none of them needs a
         // transparent one to keep the run of heights even.
-        .when(disabled, |element| element.opacity(theme.opacity.disabled));
+        .when(button.disabled, |element| {
+            element.opacity(theme.opacity.disabled)
+        });
 
     // A refused action gives up its variant's fill entirely. Dimming a
     // primary button leaves a pale slab that still out-shouts every action
     // that can actually be taken, and it leaves refused and in-flight — two
     // different answers — drawn as the same chip.
-    if disabled {
+    if button.disabled {
+        let neutral = neutral_colors_on(theme, button.ground).background;
         if let Some((tier, _)) = unified {
             // Same rule as the weights: a surfaceless tier stays bare, and a
             // tier that had a surface trades it for the neutral one.
             return match tier {
                 Variant::Subtle | Variant::Transparent => base,
-                _ => base.bg(theme.colors.raised),
+                _ => base.bg(neutral),
             };
         }
-        return match variant {
+        return match button.variant {
             ButtonVariant::Ghost => base,
             ButtonVariant::Link => base.px(px(0.0)),
-            _ => base.bg(theme.colors.raised),
+            _ => base.bg(neutral),
         };
     }
 
-    let inert = loading;
+    let inert = button.loading;
     if let Some((tier, resolved)) = unified {
         return base
             .bg(resolved.background)
@@ -615,7 +656,7 @@ fn frame(
                 element.hover(move |style| style.bg(resolved.background_hover))
             });
     }
-    match variant {
+    match button.variant {
         ButtonVariant::Primary => base.bg(theme.colors.primary_fill).when(!inert, |element| {
             element.hover(|style| style.opacity(theme.effects.primary_hover_opacity))
         }),
@@ -623,9 +664,12 @@ fn frame(
         // strongest thing in its area, which a surface step says on its own;
         // the outline it used to carry made it the most drawn-around thing on
         // the page and put a box beside every primary button.
-        ButtonVariant::Secondary => base.bg(theme.colors.raised).when(!inert, |element| {
-            element.hover(|style| style.bg(theme.colors.active))
-        }),
+        ButtonVariant::Secondary => {
+            let neutral = neutral_colors_on(theme, button.ground);
+            base.bg(neutral.background).when(!inert, |element| {
+                element.hover(move |style| style.bg(neutral.background_hover))
+            })
+        }
         ButtonVariant::Ghost => base.when(!inert, |element| {
             element.hover(|style| style.bg(theme.colors.hover))
         }),
@@ -710,6 +754,12 @@ impl IconButton {
     /// The colour the shared tiers are resolved against. See [`Button::color`].
     pub fn color(mut self, color: impl Into<ColorChoice>) -> Self {
         self.button = self.button.color(color);
+        self
+    }
+
+    /// The surface this control stands on. See [`Button::ground`].
+    pub fn ground(mut self, ground: Surface) -> Self {
+        self.button = self.button.ground(ground);
         self
     }
 
@@ -894,6 +944,55 @@ impl RenderOnce for ButtonGroup {
 mod tests {
     use super::*;
     use gpui_kit_theme::{ColorChoice, SemanticColor};
+    use gpui_kit_tokens::over;
+
+    fn distance_from(fill: Hsla, ground: Hsla) -> f32 {
+        let ground = token_color(ground);
+        (over(token_color(fill), ground).lightness() - ground.lightness()).abs()
+    }
+
+    /// Declaring an overlay matters only where the normal raised step cannot
+    /// separate itself. Both bundled appearances reach the authored floor,
+    /// and hover remains a stronger step of the same neutral wash.
+    #[test]
+    fn an_overlay_grounded_secondary_has_a_visible_neutral_fill() {
+        for theme in [Theme::studio_dark(), Theme::studio_light()] {
+            let button = Button::new("save").secondary().ground(Surface::Overlay);
+            let colors = neutral_colors_on(&theme, button.ground);
+            let (_, default) = Button::new("default")
+                .variant(Variant::Default)
+                .ground(Surface::Overlay)
+                .unified(&theme)
+                .expect("an explicit tier resolves through the shared path");
+            assert_eq!(default, colors, "Default and Secondary stay one tier");
+            let resting = distance_from(colors.background, theme.colors.overlay);
+            let hover = distance_from(colors.background_hover, theme.colors.overlay);
+            assert!(
+                resting >= SEPARATION_MINIMUM,
+                "{} resting fill gains only {resting:.2} L* from the overlay",
+                theme.id
+            );
+            assert!(
+                hover > resting,
+                "{} hover {hover:.2} L* should be stronger than rest {resting:.2} L*",
+                theme.id
+            );
+        }
+    }
+
+    /// The implicit panel ground is the historical path. Its authored raised
+    /// step already clears the floor, so a button that says nothing new keeps
+    /// exactly the old resting and hover paints.
+    #[test]
+    fn an_undeclared_ground_keeps_the_existing_secondary_paint() {
+        for theme in [Theme::studio_dark(), Theme::studio_light()] {
+            let button = Button::new("save").secondary();
+            assert_eq!(button.ground, Surface::Panel);
+            let colors = neutral_colors_on(&theme, button.ground);
+            assert_eq!(colors.background, theme.colors.raised);
+            assert_eq!(colors.background_hover, theme.colors.active);
+        }
+    }
 
     /// A button that reports `checked` has to have something on screen behind
     /// the claim. Before this, a chosen button on the shared tiers took no

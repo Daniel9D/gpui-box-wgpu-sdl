@@ -1,9 +1,9 @@
 use crate::{
     AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
-    Entity, ExternalImageHandle, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId,
-    InteractiveElement, Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels,
-    RenderImage, Resource, SharedString, SharedUri, Style, StyleRefinement, Styled, Task, Window,
-    decode_static_image, decode_static_image_from_decoder, px,
+    Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
+    Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
+    SharedString, SharedUri, StyleRefinement, Styled, Task, Window, decode_static_image,
+    decode_static_image_from_decoder, px,
 };
 use anyhow::Result;
 
@@ -46,8 +46,6 @@ pub enum ImageSource {
     Render(Arc<RenderImage>),
     /// Cached image data
     Image(Arc<Image>),
-    /// Image data interpreted directly by the active renderer.
-    External(Arc<ExternalImageHandle>),
     /// A custom loading function to use
     Custom(Arc<dyn Fn(&mut Window, &mut App) -> Option<Result<Arc<RenderImage>, ImageCacheError>>>),
 }
@@ -115,12 +113,6 @@ impl From<Arc<RenderImage>> for ImageSource {
 impl From<Arc<Image>> for ImageSource {
     fn from(value: Arc<Image>) -> Self {
         Self::Image(value)
-    }
-}
-
-impl From<Arc<ExternalImageHandle>> for ImageSource {
-    fn from(value: Arc<ExternalImageHandle>) -> Self {
-        Self::External(value)
     }
 }
 
@@ -270,29 +262,6 @@ pub struct ImgLayoutState {
     replacement: Option<AnyElement>,
 }
 
-fn apply_intrinsic_size(style: &mut Style, image_size: crate::Size<Pixels>, rem_size: Pixels) {
-    style.aspect_ratio = Some(image_size.width / image_size.height);
-
-    if let Length::Auto = style.size.width {
-        style.size.width = match style.size.height {
-            Length::Definite(DefiniteLength::Absolute(length)) => {
-                let height = length.to_pixels(rem_size);
-                Length::Definite(px(image_size.width.0 * height.0 / image_size.height.0).into())
-            }
-            _ => Length::Definite(image_size.width.into()),
-        };
-    }
-    if let Length::Auto = style.size.height {
-        style.size.height = match style.size.width {
-            Length::Definite(DefiniteLength::Absolute(length)) => {
-                let width = length.to_pixels(rem_size);
-                Length::Definite(px(image_size.height.0 * width.0 / image_size.width.0).into())
-            }
-            _ => Length::Definite(image_size.height.into()),
-        };
-    }
-}
-
 impl Element for Img {
     type RequestLayoutState = ImgLayoutState;
     type PrepaintState = Option<Hitbox>;
@@ -336,19 +305,6 @@ impl Element for Img {
                 |mut style, window, cx| {
                     let mut replacement_id = None;
 
-                    if let ImageSource::External(image) = &self.source {
-                        apply_intrinsic_size(
-                            &mut style,
-                            image.size().to_pixels(window.scale_factor()),
-                            window.rem_size(),
-                        );
-                        if let Some(state) = &mut state {
-                            state.last_frame_time = None;
-                            state.started_loading = None;
-                        }
-                        return window.request_layout(style, None, cx);
-                    }
-
                     match self.source.use_data(
                         self.image_cache
                             .clone()
@@ -389,11 +345,36 @@ impl Element for Img {
                                 frame_index = state.frame_index;
                             }
 
-                            apply_intrinsic_size(
-                                &mut style,
-                                data.render_size(frame_index),
-                                window.rem_size(),
-                            );
+                            let image_size = data.render_size(frame_index);
+                            style.aspect_ratio = Some(image_size.width / image_size.height);
+
+                            if let Length::Auto = style.size.width {
+                                style.size.width = match style.size.height {
+                                    Length::Definite(DefiniteLength::Absolute(abs_length)) => {
+                                        let height_px = abs_length.to_pixels(window.rem_size());
+                                        Length::Definite(
+                                            px(image_size.width.0 * height_px.0
+                                                / image_size.height.0)
+                                            .into(),
+                                        )
+                                    }
+                                    _ => Length::Definite(image_size.width.into()),
+                                };
+                            }
+
+                            if let Length::Auto = style.size.height {
+                                style.size.height = match style.size.width {
+                                    Length::Definite(DefiniteLength::Absolute(abs_length)) => {
+                                        let width_px = abs_length.to_pixels(window.rem_size());
+                                        Length::Definite(
+                                            px(image_size.height.0 * width_px.0
+                                                / image_size.width.0)
+                                            .into(),
+                                        )
+                                    }
+                                    _ => Length::Definite(image_size.height.into()),
+                                };
+                            }
 
                             if global_id.is_some()
                                 && data.frame_count() > 1
@@ -493,17 +474,6 @@ impl Element for Img {
             window,
             cx,
             |style, window, cx| {
-                if let ImageSource::External(image) = &source {
-                    let image_bounds = self.style.object_fit.get_bounds(bounds, image.size());
-                    window.paint_external_image(
-                        bounds,
-                        image_bounds,
-                        style.corner_radii.to_pixels(window.rem_size()),
-                        image.clone(),
-                        self.style.grayscale,
-                    );
-                    return;
-                }
                 if let Some(Ok(data)) = source.use_data(
                     self.image_cache
                         .clone()
@@ -577,7 +547,6 @@ impl ImageSource {
             ImageSource::Custom(loading_fn) => loading_fn(window, cx),
             ImageSource::Render(data) => Some(Ok(data.to_owned())),
             ImageSource::Image(data) => window.use_asset::<AssetLogger<ImageDecoder>>(data, cx),
-            ImageSource::External(_) => None,
         }
     }
 
@@ -598,7 +567,6 @@ impl ImageSource {
             ImageSource::Custom(loading_fn) => loading_fn(window, cx),
             ImageSource::Render(data) => Some(Ok(data.to_owned())),
             ImageSource::Image(data) => window.get_asset::<AssetLogger<ImageDecoder>>(data, cx),
-            ImageSource::External(_) => None,
         }
     }
 
@@ -608,7 +576,7 @@ impl ImageSource {
             ImageSource::Resource(resource) => {
                 cx.remove_asset::<ImgResourceLoader>(resource);
             }
-            ImageSource::Custom(_) | ImageSource::Render(_) | ImageSource::External(_) => {}
+            ImageSource::Custom(_) | ImageSource::Render(_) => {}
             ImageSource::Image(data) => cx.remove_asset::<AssetLogger<ImageDecoder>>(data),
         }
     }
@@ -619,7 +587,7 @@ impl ImageSource {
     pub fn is_asset_cached(&self, cx: &App) -> bool {
         match self {
             ImageSource::Resource(resource) => cx.has_asset::<ImgResourceLoader>(resource),
-            ImageSource::Custom(_) | ImageSource::Render(_) | ImageSource::External(_) => false,
+            ImageSource::Custom(_) | ImageSource::Render(_) => false,
             ImageSource::Image(data) => cx.has_asset::<AssetLogger<ImageDecoder>>(data),
         }
     }
@@ -840,98 +808,6 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     const TEST_IMG_ID: &str = "test-img";
-
-    #[test]
-    fn external_image_preserves_size_payload_and_identity() {
-        let image = Arc::new(crate::ExternalImageHandle::new(
-            size(DevicePixels(200), DevicePixels(100)),
-            "gpu".to_owned(),
-        ));
-        let other = Arc::new(crate::ExternalImageHandle::new(image.size(), ()));
-
-        assert_eq!(image.size(), size(DevicePixels(200), DevicePixels(100)));
-        assert_eq!(
-            image.downcast_ref::<String>().map(String::as_str),
-            Some("gpu")
-        );
-        assert_ne!(image.id(), other.id());
-        let _: ImageSource = image.into();
-    }
-
-    #[gpui::test]
-    fn external_image_cover_records_crop_style_and_lifetime(cx: &mut TestAppContext) {
-        let window = cx.add_empty_window();
-        let image = Arc::new(crate::ExternalImageHandle::new(
-            size(DevicePixels(200), DevicePixels(100)),
-            "live texture".to_owned(),
-        ));
-        let expected = Arc::downgrade(&image);
-
-        window.draw(point(px(10.), px(20.)), size(px(100.), px(100.)), |_, _| {
-            img(image.clone())
-                .size_full()
-                .rounded(px(100.))
-                .opacity(0.5)
-                .grayscale(true)
-                .object_fit(ObjectFit::Cover)
-                .into_any_element()
-        });
-        drop(image);
-
-        window.update(|window, _| {
-            let painted = window
-                .rendered_frame
-                .scene
-                .external_images
-                .last()
-                .expect("external image should be recorded");
-            assert_eq!(
-                painted.sprite.tile.bounds,
-                bounds(
-                    point(DevicePixels(50), DevicePixels(0)),
-                    size(DevicePixels(100), DevicePixels(100)),
-                )
-            );
-            assert_eq!(painted.sprite.color_mode, SpriteColorMode::Grayscale);
-            assert_eq!(painted.sprite.opacity, 0.5);
-            assert_eq!(
-                painted.sprite.corner_radii.top_left,
-                px(50.).scale(window.scale_factor())
-            );
-            assert!(Arc::ptr_eq(
-                &painted.image,
-                &expected.upgrade().expect("scene should retain the image")
-            ));
-        });
-    }
-
-    #[gpui::test]
-    fn external_images_with_the_same_draw_order_keep_paint_order(cx: &mut TestAppContext) {
-        let window = cx.add_empty_window();
-        let older = Arc::new(crate::ExternalImageHandle::new(
-            size(DevicePixels(1), DevicePixels(1)),
-            "older",
-        ));
-        let newer = Arc::new(crate::ExternalImageHandle::new(
-            size(DevicePixels(1), DevicePixels(1)),
-            "newer",
-        ));
-
-        window.draw(point(px(0.), px(0.)), size(px(10.), px(10.)), |_, _| {
-            div()
-                .child(img(newer.clone()).size_full())
-                .child(img(older.clone()).size_full())
-                .into_any_element()
-        });
-
-        window.update(|window, _| {
-            let images = &window.rendered_frame.scene.external_images;
-            assert_eq!(images.len(), 2);
-            assert_eq!(images[0].image.id(), newer.id());
-            assert_eq!(images[1].image.id(), older.id());
-            assert_eq!(images[0].sprite.order, images[1].sprite.order);
-        });
-    }
 
     fn test_image(frame_count: usize) -> Arc<RenderImage> {
         let frame = Frame::new(ImageBuffer::from_pixel(1, 1, Rgba([0, 0, 0, 0])));

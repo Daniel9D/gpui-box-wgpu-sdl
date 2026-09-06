@@ -935,13 +935,12 @@ struct Memory {
     range_cover: RefCell<Option<RangeCover>>,
 }
 
-type Memories = HashMap<SharedString, Rc<Memory>>;
-
 fn memory(id: &SharedString, window: &Window, cx: &mut App) -> Rc<Memory> {
-    window_state::with(
+    window_state::with_key(
+        id,
         window.window_handle().window_id(),
         cx,
-        |memories: &mut Memories| Rc::clone(memories.entry(id.clone()).or_default()),
+        |memory: &mut Rc<Memory>| Rc::clone(memory),
     )
 }
 
@@ -1890,7 +1889,22 @@ impl DataGrid {
         window: &Window,
         cx: &mut App,
     ) -> gpui::Stateful<gpui::Div> {
+        let cancelled = Rc::clone(state);
+        let released = Rc::clone(state);
+        let frame = frame
+            .child(crate::interaction::on_pointer_cancel(move |_, _| {
+                *cancelled.resizing.borrow_mut() = None;
+                *cancelled.range_drag.borrow_mut() = None;
+            }))
+            .on_mouse_up(MouseButton::Left, move |_, _, _| {
+                *released.resizing.borrow_mut() = None;
+                *released.range_drag.borrow_mut() = None;
+            });
         let Some(handler) = self.on_resize.clone().filter(|_| !self.disabled) else {
+            *state.resizing.borrow_mut() = None;
+            if self.disabled {
+                *state.range_drag.borrow_mut() = None;
+            }
             return frame;
         };
         let edges: HashMap<SharedString, MeasuredEdge> = columns
@@ -1912,7 +1926,8 @@ impl DataGrid {
         }
 
         let held = Rc::clone(state);
-        let frame = frame.on_mouse_move(move |event, window, cx| {
+
+        frame.on_mouse_move(move |event, window, cx| {
             let key = held.resizing.borrow().clone();
             let Some(key) = key else {
                 return;
@@ -1927,12 +1942,6 @@ impl DataGrid {
             let left = f32::from(bounds.get().left());
             let width = (f32::from(event.position.x) - left).max(*min_width);
             handler(key, width, window, cx);
-        });
-
-        let released = Rc::clone(state);
-        frame.on_mouse_up(MouseButton::Left, move |_, _, _| {
-            *released.resizing.borrow_mut() = None;
-            *released.range_drag.borrow_mut() = None;
         })
     }
 
@@ -2026,7 +2035,12 @@ impl DataGrid {
                             return;
                         }
                         Some(-1) => {
-                            if let Some(parent) = meta.parent {
+                            if let Some(parent) = meta.parent
+                                && (0..index).rev().any(|candidate| {
+                                    let candidate = render_row(candidate, window, cx);
+                                    candidate.id == parent && !candidate.disabled
+                                })
+                            {
                                 *state.anchor.borrow_mut() = Some(parent.clone());
                                 handler(&SelectionChange::Replace(parent), window, cx);
                                 cx.stop_propagation();
@@ -2041,17 +2055,20 @@ impl DataGrid {
                             return;
                         }
                         Some(1) if meta.has_children && meta.expanded => {
-                            if let Some((_, child)) = reachable(
-                                &render_row,
-                                index.saturating_add(1),
-                                1,
-                                count,
-                                window,
-                                cx,
-                            ) {
-                                *state.anchor.borrow_mut() = Some(child.clone());
-                                handler(&SelectionChange::Replace(child), window, cx);
-                                cx.stop_propagation();
+                            for candidate in index.saturating_add(1)..count {
+                                let child = render_row(candidate, window, cx);
+                                let Some(hierarchy) = child.hierarchy else {
+                                    break;
+                                };
+                                if hierarchy.level <= meta.level {
+                                    break;
+                                }
+                                if !child.disabled && hierarchy.parent.as_ref() == Some(&row.id) {
+                                    *state.anchor.borrow_mut() = Some(child.id.clone());
+                                    handler(&SelectionChange::Replace(child.id), window, cx);
+                                    cx.stop_propagation();
+                                    break;
+                                }
                             }
                             return;
                         }
@@ -2834,7 +2851,7 @@ fn editor_cell(
         .px(px(theme.space(Space::Xs)))
         .radius(theme, Radius::Control)
         .well(theme)
-        .shadow(theme.focus_ring_on(theme.surface(Surface::Sunken)))
+        .shadow(theme.focus_ring())
         .child(field);
     let frame = column_frame(div(), column, theme)
         .items_center()

@@ -25,7 +25,6 @@ pub(crate) struct TestPlatform {
     pub(crate) active_window: RefCell<Option<TestWindow>>,
     active_display: Rc<dyn PlatformDisplay>,
     active_cursor: Mutex<CursorStyle>,
-    cursor_visible: Mutex<bool>,
     current_clipboard_item: Mutex<Option<ClipboardItem>>,
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     current_primary_item: Mutex<Option<ClipboardItem>>,
@@ -135,7 +134,6 @@ impl TestPlatform {
             prompts: Default::default(),
             screen_capture_sources: Default::default(),
             active_cursor: Default::default(),
-            cursor_visible: Mutex::new(true),
             active_display: Rc::new(TestDisplay::new()),
             active_window: Default::default(),
             expect_restart: Default::default(),
@@ -186,10 +184,6 @@ impl TestPlatform {
             );
         }
         tx.send(Ok(selection)).ok();
-    }
-
-    pub(crate) fn show_cursor(&self) {
-        *self.cursor_visible.lock() = true;
     }
 
     pub(crate) fn did_prompt_for_paths(&self) -> bool {
@@ -531,12 +525,10 @@ impl Platform for TestPlatform {
         *self.active_cursor.lock() = style;
     }
 
-    fn hide_cursor_until_mouse_moves(&self) {
-        *self.cursor_visible.lock() = false;
-    }
+    fn hide_cursor_until_mouse_moves(&self) {}
 
     fn is_cursor_visible(&self) -> bool {
-        *self.cursor_visible.lock()
+        true
     }
 
     fn should_auto_hide_scrollbars(&self) -> bool {

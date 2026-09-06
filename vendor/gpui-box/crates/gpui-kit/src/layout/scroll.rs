@@ -15,7 +15,6 @@
 //! is transient view state, so it is held in an application global keyed by
 //! semantic identity rather than by the caller.
 
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
@@ -395,6 +394,10 @@ fn bar(
         .children(thumb);
 
     if overflowing {
+        let cancelled = Rc::clone(target);
+        gutter = gutter.child(crate::interaction::on_pointer_cancel(move |_, _| {
+            cancelled.set_scroll_dragging(false);
+        }));
         // A list that measures its rows as they arrive learns it is taller
         // than it thought while the thumb is being dragged, which would move
         // the thumb out from under the pointer holding it.
@@ -501,8 +504,6 @@ fn bar(
         .into_any_element()
 }
 
-type ScrollHandles = HashMap<SharedString, ScrollHandle>;
-
 /// How far the region with this identity has been scrolled, in pixels down
 /// and across from the start of its content.
 ///
@@ -527,11 +528,18 @@ pub fn scroll_to(ident: impl Into<Ident>, offset: Point<Pixels>, window: &Window
 }
 
 /// The scroll position of the region with this identity.
-fn scroll_handle(ident: &Ident, window: &Window, cx: &mut App) -> ScrollHandle {
-    window_state::with(
+///
+/// The same handle [`scroll_offset`] and [`scroll_to`] address, for a
+/// component that has to hand it to the element it is about to build — a menu
+/// that scrolls, and so has an edge that may be hiding a row — without
+/// carrying a field for a region whose existence depends on what it was given
+/// to show.
+pub(crate) fn scroll_handle(ident: &Ident, window: &Window, cx: &mut App) -> ScrollHandle {
+    window_state::with_key(
+        &ident.semantic_id(),
         window.window_handle().window_id(),
         cx,
-        |handles: &mut ScrollHandles| handles.entry(ident.semantic_id()).or_default().clone(),
+        |handle: &mut ScrollHandle| handle.clone(),
     )
 }
 

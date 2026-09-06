@@ -1,7 +1,7 @@
 //! Static edge data and orthogonal geometry for a node graph.
 
 use gpui::{Bounds, Hsla, PathBuilder, Pixels, Point, SharedString, Window, point, px, size};
-use gpui_kit_theme::{Radius, Theme};
+use gpui_kit_theme::{ColorChoice, Theme};
 
 /// The routing treatment of an edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -100,6 +100,20 @@ impl EdgeState {
             (Self::Failed, _) => EdgeColors::new(kind.color(theme), theme.colors.node.aura_danger),
         }
     }
+
+    /// The paints for a wire that carries a colour of its own — its port's
+    /// type or the caller's choice — with the state still saying what the
+    /// wire is doing at its far end.
+    pub(crate) fn tinted_colors(self, tint: Hsla, theme: &Theme) -> EdgeColors {
+        match self {
+            Self::Idle => {
+                EdgeColors::new(tint.opacity(theme.effects.node_active_stroke_alpha), tint)
+            }
+            Self::Active => EdgeColors::new(tint, theme.colors.node.edge_flow_highlight),
+            Self::Succeeded => EdgeColors::new(tint, theme.colors.node.aura_success),
+            Self::Failed => EdgeColors::new(tint, theme.colors.node.aura_danger),
+        }
+    }
 }
 
 /// Source and destination paints for one route frame.
@@ -181,12 +195,13 @@ impl GraphEndpoint {
 }
 
 /// A controlled connection between two graph nodes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GraphEdge {
     from: SharedString,
     to: SharedString,
     kind: EdgeKind,
-    id: Option<SharedString>,
+    id: SharedString,
+    explicit_id: bool,
     from_port: Option<SharedString>,
     to_port: Option<SharedString>,
     label: Option<SharedString>,
@@ -194,15 +209,19 @@ pub struct GraphEdge {
     marker: EdgeMarker,
     selected: bool,
     lane: i16,
+    color: Option<ColorChoice>,
 }
 
 impl GraphEdge {
     pub fn new(from: impl Into<SharedString>, to: impl Into<SharedString>) -> Self {
+        let from = from.into();
+        let to = to.into();
         Self {
-            from: from.into(),
-            to: to.into(),
+            id: compatibility_edge_id(&from, &to, None, None, EdgeKind::Flow, 0),
+            explicit_id: false,
+            from,
+            to,
             kind: EdgeKind::Flow,
-            id: None,
             from_port: None,
             to_port: None,
             label: None,
@@ -210,6 +229,7 @@ impl GraphEdge {
             marker: EdgeMarker::None,
             selected: false,
             lane: 0,
+            color: None,
         }
     }
 
@@ -223,12 +243,14 @@ impl GraphEdge {
         self.kind
     }
     pub fn id(mut self, id: impl Into<SharedString>) -> Self {
-        self.id = Some(id.into());
+        self.id = id.into();
+        self.explicit_id = true;
         self
     }
     pub fn ports(mut self, from: impl Into<SharedString>, to: impl Into<SharedString>) -> Self {
         self.from_port = Some(from.into());
         self.to_port = Some(to.into());
+        self.refresh_compatibility_id();
         self
     }
     pub fn label(mut self, label: impl Into<SharedString>) -> Self {
@@ -258,10 +280,24 @@ impl GraphEdge {
     }
     pub fn lane(mut self, lane: i16) -> Self {
         self.lane = lane;
+        self.refresh_compatibility_id();
         self
     }
     pub fn feedback(mut self) -> Self {
         self.kind = EdgeKind::Feedback;
+        self.refresh_compatibility_id();
+        self
+    }
+    /// The colour this wire wears at rest, over whatever its source port's
+    /// type would have lent it.
+    ///
+    /// Left unset, a wire between typed ports takes the colour of the port it
+    /// leaves, and a wire between untyped ports takes its kind's colour. A
+    /// caller sets this for a wire whose meaning is not its type — a wire
+    /// being traced, say — and the state colours still take over while the
+    /// wire is active, succeeded, or failed.
+    pub fn color(mut self, color: impl Into<ColorChoice>) -> Self {
+        self.color = Some(color.into());
         self
     }
 
@@ -289,35 +325,59 @@ impl GraphEdge {
     pub(crate) fn edge_lane(&self) -> i16 {
         self.lane
     }
+    pub(crate) fn edge_color(&self) -> Option<&ColorChoice> {
+        self.color.as_ref()
+    }
     /// The stable identity used for interaction and duplicate rejection.
     ///
-    /// An explicit identity supplied with [`GraphEdge::id`] is returned as-is.
-    /// Otherwise the endpoint, port, kind, and lane identities form an
-    /// unambiguous compatibility identity.
+    /// An explicit identity supplied with [`GraphEdge::id`] is returned as-is;
+    /// otherwise the builder precomputes an unambiguous compatibility identity
+    /// from the endpoints, ports, kind, and lane.
     pub fn edge_id(&self) -> SharedString {
-        if let Some(id) = &self.id {
-            return id.clone();
-        }
-        // Length prefixes make the compatibility identity unambiguous even if ids contain separators.
-        let kind = match self.kind {
-            EdgeKind::Flow => "flow",
-            EdgeKind::Feedback => "feedback",
-        };
-        format!(
-            "{}:{}|{}:{}|{}:{}|{}:{}|{}|{}",
-            self.from.len(),
-            self.from,
-            self.to.len(),
-            self.to,
-            self.from_port.as_ref().map_or(0, |v| v.len()),
-            self.from_port.as_deref().unwrap_or(""),
-            self.to_port.as_ref().map_or(0, |v| v.len()),
-            self.to_port.as_deref().unwrap_or(""),
-            kind,
-            self.lane
-        )
-        .into()
+        self.id.clone()
     }
+
+    fn refresh_compatibility_id(&mut self) {
+        if !self.explicit_id {
+            self.id = compatibility_edge_id(
+                &self.from,
+                &self.to,
+                self.from_port.as_ref(),
+                self.to_port.as_ref(),
+                self.kind,
+                self.lane,
+            );
+        }
+    }
+}
+
+fn compatibility_edge_id(
+    from: &SharedString,
+    to: &SharedString,
+    from_port: Option<&SharedString>,
+    to_port: Option<&SharedString>,
+    kind: EdgeKind,
+    lane: i16,
+) -> SharedString {
+    // Length prefixes make the compatibility identity unambiguous even if ids contain separators.
+    let kind = match kind {
+        EdgeKind::Flow => "flow",
+        EdgeKind::Feedback => "feedback",
+    };
+    format!(
+        "{}:{}|{}:{}|{}:{}|{}:{}|{}|{}",
+        from.len(),
+        from,
+        to.len(),
+        to,
+        from_port.map_or(0, |value| value.len()),
+        from_port.map_or("", SharedString::as_str),
+        to_port.map_or(0, |value| value.len()),
+        to_port.map_or("", SharedString::as_str),
+        kind,
+        lane
+    )
+    .into()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -367,7 +427,7 @@ impl OrthogonalRoute {
         if self.curved {
             0.0
         } else {
-            theme.radius(Radius::Small)
+            theme.measures.node_edge_corner
         }
     }
     pub(crate) fn points(&self) -> &[Point<f32>] {
@@ -472,10 +532,40 @@ fn distance_to_segment(at: Point<f32>, from: Point<f32>, to: Point<f32>) -> f32 
     (at.x - nearest.x).hypot(at.y - nearest.y)
 }
 
-const LEAD: f32 = 24.0;
-const CORRIDOR: f32 = 36.0;
-const LANE_SPACING: f32 = 12.0;
-const MIN_LEAD: f32 = 4.0;
+/// The distances an orthogonal route is built from, in graph units.
+///
+/// They come from the theme rather than from constants beside the router so
+/// that the corner a wire turns, the width it is drawn at, and the room it
+/// takes to leave a card are one decision: a lead shorter than the corner's
+/// radius would be rounded away before the wire had left the port.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RouteMetrics {
+    /// How far a wire runs straight out of its port before it may turn.
+    pub(crate) lead: f32,
+    /// How far outside the pair of cards an escape corridor runs.
+    pub(crate) corridor: f32,
+    /// How far apart parallel lanes sit.
+    pub(crate) lane: f32,
+}
+
+impl RouteMetrics {
+    /// The least a lead may shrink to when the cards are close: enough for
+    /// the wire to be seen leaving its port.
+    const MIN_LEAD: f32 = 4.0;
+    /// What an extra bend costs when routes are otherwise equal, in graph
+    /// units of length. A wire is read by following it, and each turn is a
+    /// place to lose it; a route that is a little longer and turns less is
+    /// the easier one to follow.
+    const BEND_PENALTY: f32 = 24.0;
+
+    pub(crate) fn of(theme: &Theme) -> Self {
+        Self {
+            lead: theme.measures.node_edge_lead,
+            corridor: theme.measures.node_edge_corridor,
+            lane: theme.measures.node_edge_lane,
+        }
+    }
+}
 
 pub(crate) fn route_orthogonal(
     from: Anchor,
@@ -484,32 +574,43 @@ pub(crate) fn route_orthogonal(
     to_bounds: Bounds<f32>,
     kind: EdgeKind,
     lane: i16,
+    metrics: RouteMetrics,
 ) -> Option<OrthogonalRoute> {
     if from.point == to.point {
-        return Some(self_route(from, from_bounds, lane));
+        return Some(self_route(from, from_bounds, lane, metrics));
     }
-    let lane_offset = lane as f32 * LANE_SPACING;
+    let lane_offset = lane as f32 * metrics.lane;
     // Separate lanes at the ports as well as in their middle corridor. Without
     // this, opposite routes between two same-side port groups can share their
     // first or last horizontal segment even though their trunks are distinct.
-    let preferred_lead = (LEAD + lane_offset).max(MIN_LEAD);
+    let preferred_lead = (metrics.lead + lane_offset).max(RouteMetrics::MIN_LEAD);
     // Two cards packed until they overlap leave a port sitting inside the
     // other's box, and no lead clears both. The connection is still a fact,
     // so the route degrades to the straight line between the two ports: an
     // edge that disappeared would say these cards are not connected, which is
     // the one thing a reader would believe without checking.
-    let (Some(from_lead), Some(to_lead)) = (
+    let (Some(mut from_lead), Some(mut to_lead)) = (
         lead_distance(from, to_bounds, preferred_lead),
         lead_distance(to, from_bounds, preferred_lead),
     ) else {
         return Some(OrthogonalRoute::new(vec![from.point, to.point]));
     };
+    // Two facing ports closer than their two leads would put the outward
+    // points past each other, and the route out of that has to double back
+    // along the port axis before it can turn. Splitting the gap between the
+    // leads keeps both stubs forward, so the wire still reads as out, across,
+    // in — only shorter.
+    if let Some(gap) = facing_gap(from, to) {
+        let half = gap / 2.0;
+        from_lead = from_lead.min(half);
+        to_lead = to_lead.min(half);
+    }
     let a = from.outward_point(from_lead);
     let b = to.outward_point(to_lead);
-    let left = from_bounds.left().min(to_bounds.left()) - CORRIDOR;
-    let right = from_bounds.right().max(to_bounds.right()) + CORRIDOR;
-    let top = from_bounds.top().min(to_bounds.top()) - CORRIDOR;
-    let bottom = from_bounds.bottom().max(to_bounds.bottom()) + CORRIDOR;
+    let left = from_bounds.left().min(to_bounds.left()) - metrics.corridor;
+    let right = from_bounds.right().max(to_bounds.right()) + metrics.corridor;
+    let top = from_bounds.top().min(to_bounds.top()) - metrics.corridor;
+    let bottom = from_bounds.bottom().max(to_bounds.bottom()) + metrics.corridor;
 
     let finish = |middle: Vec<Point<f32>>| {
         let mut points = Vec::with_capacity(middle.len() + 2);
@@ -570,6 +671,35 @@ pub(crate) fn route_orthogonal(
         }
     }
 
+    let middle_x = (a.x + b.x) / 2.0;
+    let middle_y = (a.y + b.y) / 2.0;
+
+    // A wire between two facing ports, running forward, takes the symmetric
+    // route: out, across at the halfway line, in. The two turns sit at the
+    // same distance from each card, so a column of such wires reads as one
+    // family rather than as elbows that each broke where they happened to.
+    // Anything that does not fit that description falls through to the cost
+    // search below.
+    if from.side == to.side.opposite() && from.side.axis() == to.side.axis() {
+        let forward = match from.side.axis() {
+            Axis::Horizontal => (b.x - a.x) * from.side.outward().x > 0.0,
+            Axis::Vertical => (b.y - a.y) * from.side.outward().y > 0.0,
+        };
+        let straight = match from.side.axis() {
+            Axis::Horizontal => a.y == b.y,
+            Axis::Vertical => a.x == b.x,
+        };
+        if forward && !straight {
+            let symmetric = match from.side.axis() {
+                Axis::Horizontal => vec![a, point(middle_x, a.y), point(middle_x, b.y), b],
+                Axis::Vertical => vec![a, point(a.x, middle_y), point(b.x, middle_y), b],
+            };
+            if let Some(route) = finish(symmetric) {
+                return Some(route);
+            }
+        }
+    }
+
     let mut candidates = vec![Vec::new()];
     if a.x == b.x || a.y == b.y {
         candidates.push(vec![a, b]);
@@ -577,8 +707,6 @@ pub(crate) fn route_orthogonal(
     candidates.push(vec![a, point(b.x, a.y), b]);
     candidates.push(vec![a, point(a.x, b.y), b]);
 
-    let middle_x = (a.x + b.x) / 2.0;
-    let middle_y = (a.y + b.y) / 2.0;
     for x in [middle_x, left, right] {
         candidates.push(vec![a, point(x, a.y), point(x, b.y), b]);
     }
@@ -607,6 +735,17 @@ pub(crate) fn route_orthogonal(
                 to.point,
             ]))
         })
+}
+
+/// The forward distance between two ports that face each other, or `None`
+/// when they do not face or the target sits behind the source.
+fn facing_gap(from: Anchor, to: Anchor) -> Option<f32> {
+    if from.side != to.side.opposite() {
+        return None;
+    }
+    let outward = from.side.outward();
+    let gap = (to.point.x - from.point.x) * outward.x + (to.point.y - from.point.y) * outward.y;
+    (gap > 0.0).then_some(gap)
 }
 
 fn lead_distance(anchor: Anchor, obstacle: Bounds<f32>, preferred: f32) -> Option<f32> {
@@ -661,8 +800,12 @@ fn route_is_directional(route: &OrthogonalRoute, from: Anchor, to: Anchor) -> bo
 /// Routes a connection gesture from a real port to the pointer without
 /// inventing a target node. The preview leaves the source in its declared
 /// direction and then takes one square corner to the pointer.
-pub(crate) fn route_preview(from: Anchor, to: Point<f32>) -> OrthogonalRoute {
-    let lead = from.outward_point(LEAD);
+pub(crate) fn route_preview(
+    from: Anchor,
+    to: Point<f32>,
+    metrics: RouteMetrics,
+) -> OrthogonalRoute {
+    let lead = from.outward_point(metrics.lead);
     let elbow = match from.side.axis() {
         Axis::Horizontal => point(to.x, lead.y),
         Axis::Vertical => point(lead.x, to.y),
@@ -746,9 +889,14 @@ impl Anchor {
     }
 }
 
-fn self_route(anchor: Anchor, bounds: Bounds<f32>, lane: i16) -> OrthogonalRoute {
-    let lead = anchor.outward_point(LEAD);
-    let reach = CORRIDOR + lane.unsigned_abs() as f32 * LANE_SPACING;
+fn self_route(
+    anchor: Anchor,
+    bounds: Bounds<f32>,
+    lane: i16,
+    metrics: RouteMetrics,
+) -> OrthogonalRoute {
+    let lead = anchor.outward_point(metrics.lead);
+    let reach = metrics.corridor + lane.unsigned_abs() as f32 * metrics.lane;
     let normal = anchor.side.outward();
     let perpendicular = point(-normal.y, normal.x);
     let far = point(lead.x + normal.x * reach, lead.y + normal.y * reach);
@@ -805,7 +953,7 @@ fn path_cost(points: &[Point<f32>]) -> f32 {
         .windows(2)
         .map(|pair| (pair[1].x - pair[0].x).abs() + (pair[1].y - pair[0].y).abs())
         .sum();
-    distance + points.len().saturating_sub(2) as f32 * 4.0
+    distance + points.len().saturating_sub(2) as f32 * RouteMetrics::BEND_PENALTY
 }
 
 fn normalize(points: Vec<Point<f32>>) -> Vec<Point<f32>> {
@@ -1303,6 +1451,9 @@ mod tests {
         };
         Anchor { point: p, side }
     }
+    fn metrics() -> RouteMetrics {
+        RouteMetrics::of(&Theme::studio_dark())
+    }
     fn assert_valid(route: &OrthogonalRoute, from: Anchor, to: Anchor) {
         assert_eq!(route.points()[0], from.point);
         assert_eq!(*route.points().last().expect("route endpoint"), to.point);
@@ -1336,7 +1487,7 @@ mod tests {
                 let from = anchor(from_side, a);
                 let to = anchor(to_side, b);
                 assert_valid(
-                    &route_orthogonal(from, to, a, b, EdgeKind::Flow, 0)
+                    &route_orthogonal(from, to, a, b, EdgeKind::Flow, 0, metrics())
                         .expect("separated cards route"),
                     from,
                     to,
@@ -1355,8 +1506,16 @@ mod tests {
         let overlapping = bounds(55.0, 25.0);
         let from_port = anchor(PortSide::Right, a);
         let to_port = anchor(PortSide::Left, overlapping);
-        let crossed = route_orthogonal(from_port, to_port, a, overlapping, EdgeKind::Flow, 0)
-            .expect("an overlapping pair still draws its edge");
+        let crossed = route_orthogonal(
+            from_port,
+            to_port,
+            a,
+            overlapping,
+            EdgeKind::Flow,
+            0,
+            metrics(),
+        )
+        .expect("an overlapping pair still draws its edge");
         assert_eq!(crossed.points()[0], from_port.point);
         assert_eq!(
             *crossed.points().last().expect("route endpoint"),
@@ -1364,7 +1523,7 @@ mod tests {
         );
         let from = anchor(PortSide::Bottom, a);
         let to = anchor(PortSide::Top, a);
-        let route = route_orthogonal(from, to, a, a, EdgeKind::Feedback, 0)
+        let route = route_orthogonal(from, to, a, a, EdgeKind::Feedback, 0, metrics())
             .expect("one card can route around itself");
         assert_valid(&route, from, to);
     }
@@ -1379,6 +1538,7 @@ mod tests {
             b,
             EdgeKind::Feedback,
             0,
+            metrics(),
         )
         .expect("feedback route");
         assert!(route.points().iter().any(|p| p.y > b.bottom()));
@@ -1389,8 +1549,10 @@ mod tests {
         let b = bounds(100.0, 50.0);
         let from = anchor(PortSide::Right, a);
         let to = anchor(PortSide::Left, b);
-        let x = route_orthogonal(from, to, a, b, EdgeKind::Flow, 0).expect("direct lane");
-        let y = route_orthogonal(from, to, a, b, EdgeKind::Flow, 2).expect("offset lane");
+        let x =
+            route_orthogonal(from, to, a, b, EdgeKind::Flow, 0, metrics()).expect("direct lane");
+        let y =
+            route_orthogonal(from, to, a, b, EdgeKind::Flow, 2, metrics()).expect("offset lane");
         assert_eq!(
             (x.points()[0], x.points().last()),
             (y.points()[0], y.points().last())
@@ -1417,10 +1579,26 @@ mod tests {
             point: point(30.0, upper.bottom()),
             side: PortSide::Bottom,
         };
-        let flow = route_orthogonal(flow_from, flow_to, upper, lower, EdgeKind::Flow, -1)
-            .expect("forward lane");
-        let retry = route_orthogonal(retry_from, retry_to, lower, upper, EdgeKind::Feedback, 1)
-            .expect("return lane");
+        let flow = route_orthogonal(
+            flow_from,
+            flow_to,
+            upper,
+            lower,
+            EdgeKind::Flow,
+            -1,
+            metrics(),
+        )
+        .expect("forward lane");
+        let retry = route_orthogonal(
+            retry_from,
+            retry_to,
+            lower,
+            upper,
+            EdgeKind::Feedback,
+            1,
+            metrics(),
+        )
+        .expect("return lane");
 
         let overlaps = |a: &[Point<f32>], b: &[Point<f32>]| {
             a.windows(2).any(|left| {
@@ -1449,13 +1627,44 @@ mod tests {
         let b = bounds(50.0, 0.0);
         let from = anchor(PortSide::Right, a);
         let to = anchor(PortSide::Left, b);
-        let route = route_orthogonal(from, to, a, b, EdgeKind::Flow, 0)
+        let route = route_orthogonal(from, to, a, b, EdgeKind::Flow, 0, metrics())
             .expect("the ten-unit corridor is routable");
         assert_valid(&route, from, to);
         for segment in route.points().windows(2) {
             assert!(segment_clear(segment[0], segment[1], a));
             assert!(segment_clear(segment[0], segment[1], b));
         }
+    }
+    #[test]
+    fn facing_ports_closer_than_two_leads_never_double_back() {
+        // Port to port is 44 units, less than the two 36-unit leads; the
+        // cards themselves are offset vertically so the ports do not sit
+        // inside each other's span and no clearance clamp applies.
+        let a = Bounds::new(point(24.0, 190.0), size(176.0, 192.0));
+        let b = Bounds::new(point(244.0, 40.0), size(176.0, 117.0));
+        let from = Anchor {
+            point: point(a.right(), 229.0),
+            side: PortSide::Right,
+        };
+        let to = Anchor {
+            point: point(b.left(), 79.0),
+            side: PortSide::Left,
+        };
+        let route = route_orthogonal(from, to, a, b, EdgeKind::Flow, 0, metrics())
+            .expect("a forward gap is routable");
+        assert_valid(&route, from, to);
+        for segment in route.points().windows(2) {
+            assert!(
+                segment[1].x >= segment[0].x,
+                "route doubled back: {:?}",
+                route.points()
+            );
+            assert!(segment_clear(segment[0], segment[1], a));
+            assert!(segment_clear(segment[0], segment[1], b));
+        }
+        // Both stubs share the halved gap, so the crossing is halfway.
+        let crossing = route.points()[1].x;
+        assert_eq!(crossing, (from.point.x + to.point.x) / 2.0);
     }
     #[test]
     fn sampling_uses_arc_length() {
@@ -1650,6 +1859,15 @@ mod tests {
         assert_eq!(a.edge_lane(), 3);
         assert_eq!(
             a.clone().id("business").edge_id(),
+            SharedString::from("business")
+        );
+        assert_eq!(
+            GraphEdge::new("one", "two")
+                .id("business")
+                .ports("out", "in")
+                .lane(3)
+                .feedback()
+                .edge_id(),
             SharedString::from("business")
         );
     }

@@ -1,0 +1,26 @@
+[package]
+name = "xtask"
+publish = false
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit-tokens.workspace = true
+gpui-kit = { workspace = true, features = ["fixtures"] }
+serde_json.workspace = true
+serde = { workspace = true, features = ["derive"] }
+sha2.workspace = true
+quote.workspace = true
+syn = { workspace = true, features = ["visit"] }
+toml.workspace = true
+# The site is the one thing here that does produce HTML. `gpui-kit` takes this
+# crate with the feature off on purpose, because a component renders Markdown
+# into GPUI elements and must never emit markup.
+pulldown-cmark = { workspace = true, features = ["html"] }
+
+[lints]
+workspace = true

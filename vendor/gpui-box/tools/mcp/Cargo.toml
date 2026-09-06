@@ -1,0 +1,20 @@
+[package]
+name = "gpui-box-mcp"
+description = "Remote and checkout Model Context Protocol server for GPUI Box development"
+publish = true
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "../../docs/mcp.md"
+
+[dependencies]
+anyhow.workspace = true
+axum = { version = "0.8", features = ["http1", "json", "tokio"] }
+futures.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["net", "rt-multi-thread", "signal", "sync", "time"] }
+
+[lints]
+workspace = true

@@ -359,7 +359,7 @@ impl RenderOnce for ModelViewer {
                     theme.colors.text_muted,
                     None,
                     strings.text(StringKey::ModelEmpty),
-                    strings.text(StringKey::ModelEmptyDetail),
+                    SharedString::default(),
                 ));
             }
             ModelState::Rejected(error) => {
@@ -422,6 +422,12 @@ impl RenderOnce for ModelViewer {
                 turn(ModelViewerEvent::OrbitChanged { yaw, pitch }, window, cx);
             });
 
+            let cancelled = Rc::clone(&dragging);
+            frame = frame.child(crate::interaction::on_pointer_cancel(move |_, _| {
+                let mut state = cancelled.borrow_mut();
+                state.held = false;
+                state.at = None;
+            }));
             let up = Rc::clone(&dragging);
             frame = frame.on_mouse_up(MouseButton::Left, move |_, _, _| {
                 let mut state = up.borrow_mut();
@@ -532,6 +538,9 @@ impl RenderOnce for ModelViewer {
             .value(self.state.name());
         if let Some(title) = self.title.clone() {
             spec = spec.text(title);
+        }
+        if matches!(self.state, ModelState::Empty) {
+            spec = spec.description(strings.text(StringKey::ModelEmptyDetail));
         }
 
         div()

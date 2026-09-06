@@ -1,0 +1,14 @@
+{
+  "name": "gpui-box-browser-gallery-smoke",
+  "private": true,
+  "scripts": {
+    "smoke": "playwright test --config playwright.config.mjs",
+    "visual:check": "playwright test --config visual.config.mjs",
+    "visual:capture": "playwright test --config visual.config.mjs --update-snapshots"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "binaryen": "132.0.0",
+    "pngjs": "7.0.0"
+  }
+}

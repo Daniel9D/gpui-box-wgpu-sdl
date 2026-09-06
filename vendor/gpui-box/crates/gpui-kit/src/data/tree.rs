@@ -55,6 +55,7 @@ use crate::interaction::dnd::{
     self, DragItem, DropAxis, DropIntent, DropPosition, MakingWay, RowTarget, SurfaceDrag,
 };
 use crate::motion::{self, keyed};
+use crate::overlay::Tooltipped;
 use crate::strings::{ActiveNumbers, ActiveStrings, StringKey};
 
 type ToggleHandler = Rc<dyn Fn(SharedString, bool, &mut Window, &mut App)>;
@@ -336,7 +337,6 @@ struct Visible {
     open: bool,
     has_children: bool,
     parent: Option<SharedString>,
-    first_child: Option<SharedString>,
     kind: VisibleKind,
 }
 
@@ -399,7 +399,6 @@ fn flatten(
             open: open && has_children,
             has_children,
             parent: parent.cloned(),
-            first_child: node.children.first().map(|child| child.id.clone()),
             kind: VisibleKind::Node,
         });
         if open && has_children {
@@ -414,7 +413,6 @@ fn flatten(
                         open: false,
                         has_children: false,
                         parent: Some(node.id.clone()),
-                        first_child: None,
                         kind: VisibleKind::Loading,
                     });
                 }
@@ -428,7 +426,6 @@ fn flatten(
                         open: false,
                         has_children: false,
                         parent: Some(node.id.clone()),
-                        first_child: None,
                         kind: VisibleKind::Unavailable,
                     });
                 }
@@ -442,7 +439,6 @@ fn flatten(
                         open: false,
                         has_children: false,
                         parent: Some(node.id.clone()),
-                        first_child: None,
                         kind: VisibleKind::Failed,
                     });
                 }
@@ -520,21 +516,33 @@ fn keystroke_move(
         "end" => step(visible, visible.len() as isize - 1, -1).map(Move::Select),
         "toward-children" => {
             let node = visible.get(at?)?;
+            if node.disabled {
+                return None;
+            }
             if node.has_children && !node.open {
                 Some(Move::Toggle(node.id.clone(), true))
             } else {
-                node.first_child
-                    .clone()
-                    .filter(|_| node.open)
-                    .map(Move::Select)
+                visible[at? + 1..]
+                    .iter()
+                    .take_while(|child| child.level > node.level)
+                    .find(|child| {
+                        node.open && !child.disabled && child.parent.as_ref() == Some(&node.id)
+                    })
+                    .map(|child| Move::Select(child.id.clone()))
             }
         }
         "toward-parent" => {
             let node = visible.get(at?)?;
+            if node.disabled {
+                return None;
+            }
             if node.has_children && node.open {
                 Some(Move::Toggle(node.id.clone(), false))
             } else {
-                node.parent.clone().map(Move::Select)
+                visible
+                    .iter()
+                    .find(|parent| !parent.disabled && Some(&parent.id) == node.parent.as_ref())
+                    .map(|parent| Move::Select(parent.id.clone()))
             }
         }
         _ => None,
@@ -641,13 +649,10 @@ impl Tree {
             if let Some(replacement) = self.slots.render(slot::FAILED, window, cx) {
                 return replacement;
             }
-            return EmptyState::new(
-                self.ident.child("empty"),
-                cx.strings().text(StringKey::TreeChildrenUnavailable),
-            )
-            .kind(EmptyKind::Failed)
-            .detail(failure)
-            .into_any_element();
+            return EmptyState::new(self.ident.child("empty"), SharedString::default())
+                .kind(EmptyKind::Failed)
+                .detail(failure)
+                .into_any_element();
         }
         if let Some(replacement) = self.slots.render(slot::EMPTY, window, cx) {
             return replacement;
@@ -671,18 +676,19 @@ impl RenderOnce for Tree {
         let extra = self.slots.render(slot::HEADER_EXTRA, window, cx);
         if self.nodes.is_empty() {
             let vacant = self.vacant(window, cx);
+            let mut spec = NodeSpec::new(self.ident.semantic_id(), Role::Tree)
+                .value("0")
+                .busy(self.loading);
+            if self.failure.is_some() {
+                spec = spec.description(cx.strings().text(StringKey::TreeChildrenUnavailable));
+            }
             return div()
                 .id(self.ident.element_id())
                 .column()
                 .w_full()
                 .children(extra)
                 .child(vacant)
-                .semantic_in(
-                    cx,
-                    NodeSpec::new(self.ident.semantic_id(), Role::Tree)
-                        .value("0")
-                        .busy(self.loading),
-                )
+                .semantic_in(cx, spec)
                 .into_any_element();
         }
         let reorder = self.reorder(window, cx);
@@ -1085,27 +1091,22 @@ impl Rows {
         cx: &mut App,
     ) -> AnyElement {
         let ident = self.ident.child(node.id.as_ref());
-        let (label, value, busy) = match node.kind {
+        let (label, detail, value, busy) = match node.kind {
             VisibleKind::Loading => (
                 cx.strings().text(StringKey::TreeLoadingChildren),
+                None,
                 "loading",
                 true,
             ),
             VisibleKind::Unavailable => (
-                if node.label.is_empty() {
-                    cx.strings().text(StringKey::TreeChildrenUnavailable)
-                } else {
-                    node.label.clone()
-                },
+                cx.strings().text(StringKey::TreeChildrenUnavailable),
+                (!node.label.is_empty()).then(|| node.label.clone()),
                 "unavailable",
                 false,
             ),
             VisibleKind::Failed => (
-                if node.label.is_empty() {
-                    cx.strings().text(StringKey::TreeChildrenUnavailable)
-                } else {
-                    node.label.clone()
-                },
+                cx.strings().text(StringKey::TreeChildrenUnavailable),
+                (!node.label.is_empty()).then(|| node.label.clone()),
                 "failed",
                 false,
             ),
@@ -1143,10 +1144,7 @@ impl Rows {
             ),
             VisibleKind::Node => unreachable!("status rows are not nodes"),
         };
-        let color = match node.kind {
-            VisibleKind::Loading => theme.colors.text_muted,
-            _ => theme.colors.text_faint,
-        };
+        let semantic_text = detail.clone().unwrap_or_else(|| label.clone());
         motion::surface_in(
             ident.element_id(),
             theme,
@@ -1172,12 +1170,13 @@ impl Rows {
                         .text_color(mark_color)
                         .child(mark),
                 )
-                .child(
-                    text(theme, TypeScale::Caption, label.clone())
+                .children(detail.map(|detail| {
+                    text(theme, TypeScale::Caption, detail)
                         .flex_1()
                         .text_start(direction)
-                        .text_color(color),
-                )
+                        .text_color(theme.colors.text_faint)
+                }))
+                .tip(ident.clone(), label)
                 .semantic_in(
                     cx,
                     NodeSpec::new(ident.semantic_id(), Role::Status)
@@ -1188,7 +1187,7 @@ impl Rows {
                                     self.ident.child(parent.as_ref()).semantic_id()
                                 }),
                         )
-                        .text(label)
+                        .text(semantic_text)
                         .value(value)
                         .busy(busy)
                         .level(node.level),
@@ -1201,6 +1200,40 @@ impl Rows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hierarchy_moves_only_reach_enabled_direct_relatives() {
+        for (direction, descend, ascend) in [
+            (LayoutDirection::LeftToRight, "right", "left"),
+            (LayoutDirection::RightToLeft, "left", "right"),
+        ] {
+            let nodes = [
+                TreeNode::new("a", "A").children([
+                    TreeNode::new("blocked", "Blocked")
+                        .disabled(true)
+                        .children([TreeNode::new("grandchild", "Grandchild")]),
+                    TreeNode::new("sibling", "Sibling"),
+                ]),
+                TreeNode::new("b", "B"),
+            ];
+            let mut rows = Vec::new();
+            flatten(&nodes, &["a".into(), "blocked".into()], 1, None, &mut rows);
+            let a = SharedString::from("a");
+            assert!(
+                matches!(keystroke_move(descend, direction, &rows, Some(&a)), Some(Move::Select(id)) if id == "sibling")
+            );
+            let blocked = SharedString::from("blocked");
+            assert!(keystroke_move(descend, direction, &rows, Some(&blocked)).is_none());
+            assert!(keystroke_move(ascend, direction, &rows, Some(&blocked)).is_none());
+            let grandchild = SharedString::from("grandchild");
+            assert!(keystroke_move(ascend, direction, &rows, Some(&grandchild)).is_none());
+            rows.iter_mut()
+                .find(|row| row.id == "sibling")
+                .expect("enabled direct sibling")
+                .disabled = true;
+            assert!(keystroke_move(descend, direction, &rows, Some(&a)).is_none());
+        }
+    }
 
     fn sample() -> Vec<TreeNode> {
         vec![

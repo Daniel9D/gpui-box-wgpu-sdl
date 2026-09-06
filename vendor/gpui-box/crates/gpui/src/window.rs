@@ -1,17 +1,18 @@
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::Inspector;
+use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
+use crate::interactive::TouchEvent;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTextureId, AtlasTextureKind, AtlasTile, AvailableSpace, BackdropGlass,
-    Background, BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode,
-    CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree,
-    DisplayId, DocumentSelectionState, Edges, Effect, Entity, EntityId, EventEmitter,
-    ExternalDropEvent, ExternalImageHandle, FileDropEvent, FontId, GlassLobe, GlassMaterial,
-    Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext,
-    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, MAX_GLASS_LOBES,
-    Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent,
-    MouseUpEvent, PaintExternalImage, ParticleEmitter, Path, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformViewHandle,
+    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropGlass, Background, BorderStyle, Bounds,
+    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
+    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, DocumentSelectionState, Edges,
+    Effect, Entity, EntityId, EventEmitter, ExternalDropEvent, FileDropEvent, FontId, GlassLobe,
+    GlassMaterial, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
+    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
+    LineLayoutIndex, MAX_GLASS_LOBES, Modifiers, ModifiersChangedEvent, MonochromeSprite,
+    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, ParticleEmitter, Path, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformViewHandle,
     PlatformViewPlacement, PlatformViewRegistry, PlatformWindow, Point, PolychromeSprite, Priority,
     PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams,
     RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X,
@@ -19,7 +20,7 @@ use crate::{
     SelectionScopeId, Shadow, SharedString, Size, SpriteColorMode, SpriteInstance,
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, TileId, TransformationMatrix, Underline, UnderlineStyle,
+    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
     WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, profiler, px, rems, size,
     transparent_black,
@@ -923,6 +924,7 @@ pub(crate) struct DeferredDraw {
     current_view: EntityId,
     priority: usize,
     parent_node: DispatchNodeId,
+    a11y_context: Option<a11y::DeferredA11yContext>,
     element_id_stack: SmallVec<[ElementId; 32]>,
     text_style_stack: Vec<TextStyleRefinement>,
     content_mask: Option<ContentMask<Pixels>>,
@@ -1202,9 +1204,15 @@ pub struct Window {
     /// Tracks recent input event timestamps to determine if input is arriving at a high rate.
     /// Used to selectively enable VRR optimization only when input rate exceeds 60fps.
     pub(crate) input_rate_tracker: Rc<RefCell<InputRateTracker>>,
+    frame_inputs: FrameInputAccumulator,
+    pending_frame_timing: Option<PendingFrameTiming>,
     #[cfg(feature = "input-latency-histogram")]
     input_latency_tracker: InputLatencyTracker,
     last_input_modality: InputModality,
+    touch_gestures: TouchGestureRecognizer,
+    touch_prediction_enabled: bool,
+    long_press_timer: Option<Task<()>>,
+    long_press_capture: Option<EntityId>,
     pub(crate) refreshing: bool,
     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
     pub(crate) focus: Option<FocusId>,
@@ -1228,6 +1236,7 @@ pub struct Window {
     /// element has an id. This remaps capture to its replacement hitbox after
     /// a redraw.
     captured_pointer_element: Option<GlobalElementId>,
+    captured_pointer_button: Option<MouseButton>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector: Option<Entity<Inspector>>,
     pub(crate) a11y: A11y,
@@ -1286,33 +1295,75 @@ impl InputRateTracker {
     }
 }
 
+#[derive(Clone, Copy)]
+struct PendingFrameTiming {
+    trace_generation: u64,
+    timing: profiler::FrameTiming,
+}
+
+#[derive(Default)]
+struct FrameInputAccumulator {
+    trace_generation: Option<u64>,
+    first_input_at: Option<Instant>,
+    input_events: u64,
+}
+
+impl FrameInputAccumulator {
+    fn record(&mut self, trace_generation: u64, input_at: Instant) {
+        if self.trace_generation != Some(trace_generation) {
+            *self = Self {
+                trace_generation: Some(trace_generation),
+                ..Default::default()
+            };
+        }
+        self.first_input_at.get_or_insert(input_at);
+        self.input_events = self.input_events.saturating_add(1);
+    }
+
+    fn take(&mut self, trace_generation: u64) -> (Option<Instant>, u64) {
+        if self.trace_generation != Some(trace_generation) {
+            *self = Self::default();
+            return (None, 0);
+        }
+        let inputs = (self.first_input_at, self.input_events);
+        *self = Self::default();
+        inputs
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 /// A point-in-time snapshot of the input-latency histograms for a window,
 /// suitable for external formatting.
 #[cfg(feature = "input-latency-histogram")]
 #[derive(Clone)]
 pub struct InputLatencySnapshot {
-    /// Histogram of input-to-frame latency samples, in nanoseconds.
+    /// Histogram of input-to-platform-submission latency samples, in
+    /// nanoseconds.
     pub latency_histogram: Histogram<u64>,
-    /// Histogram of input events coalesced per rendered frame.
+    /// Histogram of input events coalesced per submitted frame.
     pub events_per_frame_histogram: Histogram<u64>,
     /// Count of input events that arrived mid-draw and were excluded from
     /// latency recording.
     pub mid_draw_events_dropped: u64,
 }
 
-/// Records the time between when the first input event in a frame is dispatched
-/// and when the resulting frame is presented, capturing worst-case latency when
-/// multiple events are coalesced into a single frame.
+/// Records the time between the first input dispatch and synchronous platform
+/// submission of the resulting frame, capturing worst-case latency when
+/// multiple events are coalesced. This does not observe compositor or display
+/// presentation completion.
 #[cfg(feature = "input-latency-histogram")]
 struct InputLatencyTracker {
     /// Timestamp of the first unrendered input event in the current frame;
-    /// cleared when a frame is presented.
+    /// cleared when a frame is submitted.
     first_input_at: Option<Instant>,
-    /// Count of input events received since the last frame was presented.
+    /// Count of input events received since the last frame was submitted.
     pending_input_count: u64,
-    /// Histogram of input-to-frame latency samples, in nanoseconds.
+    /// Histogram of input-to-submission latency samples, in nanoseconds.
     latency_histogram: Histogram<u64>,
-    /// Histogram of input events coalesced per rendered frame.
+    /// Histogram of input events coalesced per submitted frame.
     events_per_frame_histogram: Histogram<u64>,
     /// Count of input events that arrived mid-draw and were excluded from
     /// latency recording because their effects won't appear until the next frame.
@@ -1346,8 +1397,9 @@ impl InputLatencyTracker {
         self.mid_draw_events_dropped += 1;
     }
 
-    /// Record that a frame was presented, flushing pending latency and coalescing samples.
-    fn record_frame_presented(&mut self) {
+    /// Record that a frame was submitted, flushing pending latency and
+    /// coalescing samples.
+    fn record_frame_submitted(&mut self) {
         if let Some(first_input_at) = self.first_input_at.take() {
             let latency_nanos = first_input_at.elapsed().as_nanos() as u64;
             self.latency_histogram.record(latency_nanos).ok();
@@ -1477,52 +1529,6 @@ fn validate_image_source(
         frame_size.height.0
     );
     Ok(())
-}
-
-fn visible_image_region(
-    bounds: Bounds<Pixels>,
-    image_bounds: Bounds<Pixels>,
-    image_size: Size<DevicePixels>,
-) -> Option<(Bounds<Pixels>, Bounds<DevicePixels>)> {
-    let visible_bounds = bounds.intersect(&image_bounds);
-    if visible_bounds.size.width <= Pixels::ZERO
-        || visible_bounds.size.height <= Pixels::ZERO
-        || image_bounds.size.width <= Pixels::ZERO
-        || image_bounds.size.height <= Pixels::ZERO
-    {
-        return None;
-    }
-    if visible_bounds == image_bounds {
-        return Some((
-            visible_bounds,
-            Bounds {
-                origin: Point::default(),
-                size: image_size,
-            },
-        ));
-    }
-
-    let x_offset = (visible_bounds.origin.x - image_bounds.origin.x) / image_bounds.size.width;
-    let y_offset = (visible_bounds.origin.y - image_bounds.origin.y) / image_bounds.size.height;
-    let width = visible_bounds.size.width / image_bounds.size.width;
-    let height = visible_bounds.size.height / image_bounds.size.height;
-    let source_x = (x_offset * image_size.width.0 as f32).round() as i32;
-    let source_y = (y_offset * image_size.height.0 as f32).round() as i32;
-    let source_width = (width * image_size.width.0 as f32).round() as i32;
-    let source_height = (height * image_size.height.0 as f32).round() as i32;
-    let source_x = source_x.clamp(0, image_size.width.0);
-    let source_y = source_y.clamp(0, image_size.height.0);
-
-    Some((
-        visible_bounds,
-        Bounds {
-            origin: point(DevicePixels(source_x), DevicePixels(source_y)),
-            size: size(
-                DevicePixels(source_width.min(image_size.width.0 - source_x).max(0)),
-                DevicePixels(source_height.min(image_size.height.0 - source_y).max(0)),
-            ),
-        },
-    ))
 }
 
 impl Window {
@@ -2086,9 +2092,23 @@ impl Window {
             hovered,
             needs_present,
             input_rate_tracker,
+            frame_inputs: FrameInputAccumulator::default(),
+            pending_frame_timing: None,
             #[cfg(feature = "input-latency-histogram")]
             input_latency_tracker: InputLatencyTracker::new()?,
             last_input_modality: InputModality::Mouse,
+            touch_gestures: cx.platform.gestures().map_or_else(
+                || TouchGestureRecognizer::new(GestureTuning::default()),
+                |gestures| {
+                    TouchGestureRecognizer::new_with_scroll_physics(
+                        gestures.tuning(),
+                        gestures.scroll_physics(),
+                    )
+                },
+            ),
+            touch_prediction_enabled: true,
+            long_press_timer: None,
+            long_press_capture: None,
             refreshing: false,
             activation_observers: SubscriberSet::new(),
             focus: None,
@@ -2105,6 +2125,7 @@ impl Window {
             document_selection: crate::DocumentSelectionState::default(),
             captured_hitbox: None,
             captured_pointer_element: None,
+            captured_pointer_button: None,
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector: None,
             a11y: A11y::new(
@@ -3143,8 +3164,10 @@ impl Window {
     /// regardless of actual hit testing. This enables drag operations that continue
     /// even when the pointer moves outside the element's bounds.
     ///
-    /// The capture is automatically released on mouse up.
+    /// This legacy unbound capture releases on any mouse up or cancellation.
+    /// Prefer [`Self::capture_pointer_for_button`] for a button-owned gesture.
     pub fn capture_pointer(&mut self, hitbox_id: HitboxId) {
+        self.captured_pointer_button = None;
         self.captured_hitbox = Some(hitbox_id);
         self.captured_pointer_element = self
             .rendered_frame
@@ -3153,15 +3176,37 @@ impl Window {
             .find_map(|(element_id, id)| (*id == hitbox_id).then(|| element_id.clone()));
     }
 
+    /// Captures until the specified button is released, or the stream is
+    /// cancelled. Other buttons' releases do not terminate this gesture.
+    pub fn capture_pointer_for_button(&mut self, hitbox_id: HitboxId, button: MouseButton) {
+        self.capture_pointer(hitbox_id);
+        self.captured_pointer_button = Some(button);
+    }
+
     /// Releases any active pointer capture.
     pub fn release_pointer(&mut self) {
         self.captured_hitbox = None;
         self.captured_pointer_element = None;
+        self.captured_pointer_button = None;
     }
 
     /// Returns the hitbox that has captured the pointer, if any.
     pub fn captured_hitbox(&self) -> Option<HitboxId> {
         self.captured_hitbox
+    }
+
+    /// Captures the current long press for the given entity.
+    ///
+    /// The capture is released when the gesture ends or is cancelled, or when
+    /// a replacement touch begins. A listener must also call
+    /// [`Self::prevent_default`] on the started event to claim the gesture.
+    pub fn capture_long_press<T: 'static>(&mut self, entity: &Entity<T>) {
+        self.long_press_capture = Some(entity.entity_id());
+    }
+
+    /// Returns whether the given entity has captured the current long press.
+    pub fn has_long_press_capture<T: 'static>(&self, entity: &Entity<T>) -> bool {
+        self.long_press_capture == Some(entity.entity_id())
     }
 
     /// Associates a frame-local hitbox with a stable element id and remaps an
@@ -3206,7 +3251,8 @@ impl Window {
         // Drain unconditionally so a stale first-invalidation timestamp can't
         // leak into a later frame across enable/disable of frame tracing.
         let frame_dirty = self.invalidator.take_frame_dirty();
-        let draw_started_at = profiler::frame_trace_enabled().then(Instant::now);
+        let frame_trace_generation = profiler::frame_trace_generation();
+        let draw_started_at = frame_trace_generation.map(|_| Instant::now());
         self.current_frame_stats = profiler::FrameStats {
             frame_index: self.completed_frame_stats.frame_index.saturating_add(1),
             invalidations: frame_dirty.invalidations,
@@ -3336,14 +3382,24 @@ impl Window {
         }
         self.completed_frame_stats = self.current_frame_stats;
 
-        if let Some(draw_start) = draw_started_at {
-            profiler::record_frame_timing(profiler::FrameTiming {
+        if let (Some(trace_generation), Some(draw_start)) =
+            (frame_trace_generation, draw_started_at)
+        {
+            let timing = profiler::FrameTiming {
                 window_id: self.handle.window_id(),
                 dirty_at: frame_dirty.dirty_at,
                 invalidations: frame_dirty.invalidations,
                 draw_start,
                 draw_end: Instant::now(),
+            };
+            profiler::record_frame_timing(timing);
+            self.pending_frame_timing = Some(PendingFrameTiming {
+                trace_generation,
+                timing,
             });
+        } else {
+            self.pending_frame_timing = None;
+            self.frame_inputs.clear();
         }
 
         // Exit the scope to obtain the arena-clear token this draw owes; the
@@ -3413,21 +3469,38 @@ impl Window {
 
     #[profiling::function]
     fn present(&mut self) {
+        let pending_timing = self.pending_frame_timing.take();
+        let submission_start = pending_timing.map(|_| Instant::now());
         self.platform_window.draw_layered(
             &self.rendered_frame.scene,
             self.rendered_frame.overlay_scene_start,
         );
+        if let (Some(pending), Some(submission_start)) = (pending_timing, submission_start) {
+            let (first_input_at, input_events) = self.frame_inputs.take(pending.trace_generation);
+            profiler::record_frame_submission(
+                pending.trace_generation,
+                profiler::FrameSubmissionTiming {
+                    frame: pending.timing,
+                    submission_start,
+                    submission_end: Instant::now(),
+                    first_input_at,
+                    input_events,
+                },
+            );
+        } else if profiler::frame_trace_generation().is_none() {
+            self.frame_inputs.clear();
+        }
         #[cfg(feature = "input-latency-histogram")]
-        self.input_latency_tracker.record_frame_presented();
+        self.input_latency_tracker.record_frame_submitted();
         self.needs_present.set(false);
         profiling::finish_frame!();
     }
 
-    /// Presents the most recently drawn frame if it hasn't been presented yet.
+    /// Submits the most recently drawn frame if it hasn't been submitted yet.
     ///
     /// Benchmarks drive drawing synchronously rather than through a platform
     /// frame-request loop, so they call this after each measured update to
-    /// submit the frame like production presentation would.
+    /// submit the frame like the production frame loop would.
     #[cfg(feature = "bench")]
     pub fn present_if_needed(&mut self) {
         if self.needs_present.get() {
@@ -3449,6 +3522,9 @@ impl Window {
         self.a11y.sync_active_flag();
         if self.a11y.is_active() {
             self.a11y.begin_frame();
+            // Accessibility nodes and deferred child reservations are rebuilt
+            // each frame, not replayed by the visual prepaint/paint caches.
+            self.refreshing = true;
         }
 
         let _inspector_width: Pixels = rems(30.0).to_pixels(self.rem_size());
@@ -3688,6 +3764,7 @@ impl Window {
                 let (
                     element,
                     parent_node,
+                    a11y_context,
                     current_view,
                     rem_size,
                     absolute_offset,
@@ -3702,6 +3779,7 @@ impl Window {
                     (
                         deferred_draw.element.take(),
                         deferred_draw.parent_node,
+                        deferred_draw.a11y_context.clone(),
                         deferred_draw.current_view,
                         deferred_draw.rem_size,
                         deferred_draw.absolute_offset,
@@ -3710,6 +3788,9 @@ impl Window {
                     )
                 };
                 self.next_frame.dispatch_tree.set_active_node(parent_node);
+                let a11y_state = a11y_context
+                    .filter(|_| self.a11y.is_active())
+                    .map(|context| self.a11y.nodes.begin_deferred(context));
 
                 let prepaint_start = self.prepaint_index();
                 if let Some(mut element) = element {
@@ -3725,6 +3806,9 @@ impl Window {
                     self.next_frame.deferred_draws[deferred_draw_ix].element = Some(element);
                 } else {
                     self.reuse_prepaint(prepaint_range);
+                }
+                if let Some(state) = a11y_state {
+                    self.a11y.nodes.end_deferred(state);
                 }
                 let prepaint_end = self.prepaint_index();
                 self.next_frame.deferred_draws[deferred_draw_ix].prepaint_range =
@@ -3832,6 +3916,7 @@ impl Window {
                 .map(|deferred_draw| DeferredDraw {
                     current_view: deferred_draw.current_view,
                     parent_node: reused_subtree.refresh_node_id(deferred_draw.parent_node),
+                    a11y_context: deferred_draw.a11y_context.clone(),
                     element_id_stack: deferred_draw.element_id_stack.clone(),
                     text_style_stack: deferred_draw.text_style_stack.clone(),
                     content_mask: deferred_draw.content_mask,
@@ -4325,15 +4410,75 @@ impl Window {
         opacity * ramp
     }
 
-    /// Per-pixel [`EdgeFade`] for quads: a SOLID background on a quad that
-    /// crosses an active fade ramp is rewritten as a linear gradient whose
-    /// stops sit AT the band boundary in quad space (the shader clamps `t`
-    /// outside the stop range), so the piecewise ramp renders exactly and the
-    /// GPU interpolates per pixel — uniform per-primitive alpha visibly
-    /// popped/clipped on anything wider than the band (tab washes, row
-    /// selections). `None` = no rewrite applies; callers fall back to the
-    /// center-point alpha.
-    fn quad_fade_gradient(
+    /// The opacity for a primitive too large to treat as one atomic mark.
+    ///
+    /// Along an axis where the primitive is no larger than the fade band this
+    /// retains [`Self::element_opacity_for_bounds`]'s nearest-edge sampling.
+    /// Along an axis where it is larger, the ramp is sampled at the center of
+    /// the part inside the fade region. This keeps ordinary controls and
+    /// glyph-sized sprites fading before they are clipped while ensuring a
+    /// tall shadow or image is not erased merely because its far edge is
+    /// outside the region.
+    #[inline]
+    fn element_opacity_for_visible_bounds(&self, bounds: &Bounds<Pixels>) -> f32 {
+        let opacity = self.element_opacity();
+        let Some(fade) = &self.edge_fade else {
+            return opacity;
+        };
+        let visible_bounds = bounds.intersect(&fade.bounds);
+        if visible_bounds.is_empty() {
+            return self.element_opacity_for_bounds(bounds);
+        }
+
+        let band = fade.band.0.max(1.0);
+        let visible_center = visible_bounds.center();
+        let sample_x_at_center = bounds.size.width.0 > band;
+        let sample_y_at_center = bounds.size.height.0 > band;
+        let mut ramp: f32 = 1.0;
+        if fade.top {
+            let y = if sample_y_at_center {
+                visible_center.y.0
+            } else {
+                bounds.top().0
+            };
+            ramp = ramp.min(((y - fade.bounds.top().0) / band).clamp(0.0, 1.0));
+        }
+        if fade.bottom {
+            let y = if sample_y_at_center {
+                visible_center.y.0
+            } else {
+                bounds.bottom().0
+            };
+            ramp = ramp.min(((fade.bounds.bottom().0 - y) / band).clamp(0.0, 1.0));
+        }
+        if fade.left {
+            let x = if sample_x_at_center {
+                visible_center.x.0
+            } else {
+                bounds.left().0
+            };
+            ramp = ramp.min(((x - fade.bounds.left().0) / band).clamp(0.0, 1.0));
+        }
+        if fade.right {
+            let x = if sample_x_at_center {
+                visible_center.x.0
+            } else {
+                bounds.right().0
+            };
+            ramp = ramp.min(((fade.bounds.right().0 - x) / band).clamp(0.0, 1.0));
+        }
+        opacity * ramp
+    }
+
+    /// Per-pixel [`EdgeFade`] for solid backgrounds: a primitive that crosses
+    /// an active fade ramp is rewritten as a linear gradient whose stops sit
+    /// AT the band boundary in the bounds used by that primitive's shader.
+    /// The shader clamps `t` outside the stop range, so the piecewise ramp
+    /// renders exactly and the GPU interpolates per pixel — uniform
+    /// per-primitive alpha visibly popped/clipped on anything wider than the
+    /// band (tab washes, row selections). `None` = no rewrite applies;
+    /// callers fall back to uniform alpha sampling.
+    fn edge_fade_gradient(
         &self,
         bounds: Bounds<Pixels>,
         background: &Background,
@@ -4374,14 +4519,14 @@ impl Window {
         let in_hi_band = fade_hi && hi > edge_hi - band;
         let base = self.element_opacity();
         let color = background.solid;
-        // Anchor both stops INSIDE the band segment, clamped to the quad: the
-        // ramp's zero must sit at the REGION edge (v = edge), not the quad
-        // edge — anchoring at a partially-scrolled-out quad's own edge left
-        // its visible part nonzero at the clip line (user report). The shader
+        // Anchor both stops INSIDE the band segment, clamped to the primitive:
+        // the ramp's zero must sit at the REGION edge (v = edge), not the
+        // primitive edge — anchoring at a partially-scrolled-out primitive's
+        // own edge left its visible part nonzero at the clip line. The shader
         // clamps t outside the stop range, extending both plateaus exactly.
         let (v0, v1, a0, a1) = match (in_lo_band, in_hi_band) {
-            // A quad spanning BOTH bands can't be expressed with two stops;
-            // no variation at all needs no gradient.
+            // A primitive spanning BOTH bands can't be expressed with two
+            // stops; no variation at all needs no gradient.
             (true, true) | (false, false) => return None,
             (true, false) => {
                 let v0 = lo.max(edge_lo);
@@ -4609,6 +4754,9 @@ impl Window {
     /// When `content_mask` is provided, the deferred element will be clipped to that region during
     /// both prepaint and paint. When `None`, no additional clipping is applied.
     ///
+    /// Accessibility surfaces attach to the window root, independently of their
+    /// trigger. Inline subtrees should use [`Self::defer_draw_with_accessibility`].
+    ///
     /// This method should only be called as part of the prepaint phase of element drawing.
     pub fn defer_draw(
         &mut self,
@@ -4616,6 +4764,32 @@ impl Window {
         absolute_offset: Point<Pixels>,
         priority: usize,
         content_mask: Option<ContentMask<Pixels>>,
+    ) {
+        self.defer_draw_inner(element, absolute_offset, priority, content_mask, None);
+    }
+
+    /// Defers an inline subtree while retaining its logical accessibility
+    /// ancestors and source-order child position, including nested deferrals.
+    /// Clipping and paint priority behave exactly as in [`Self::defer_draw`].
+    /// Call only during prepaint.
+    pub fn defer_draw_with_accessibility(
+        &mut self,
+        element: AnyElement,
+        absolute_offset: Point<Pixels>,
+        priority: usize,
+        content_mask: Option<ContentMask<Pixels>>,
+    ) {
+        let context = self.a11y.is_active().then(|| self.a11y.nodes.defer());
+        self.defer_draw_inner(element, absolute_offset, priority, content_mask, context);
+    }
+
+    fn defer_draw_inner(
+        &mut self,
+        element: AnyElement,
+        absolute_offset: Point<Pixels>,
+        priority: usize,
+        content_mask: Option<ContentMask<Pixels>>,
+        a11y_context: Option<a11y::DeferredA11yContext>,
     ) {
         self.invalidator.debug_assert_prepaint();
         let parent_node = self
@@ -4626,6 +4800,7 @@ impl Window {
         self.next_frame.deferred_draws.push(DeferredDraw {
             current_view: self.current_view(),
             parent_node,
+            a11y_context,
             element_id_stack: self.element_id_stack.clone(),
             text_style_stack: self.text_style_stack.clone(),
             content_mask,
@@ -4678,7 +4853,6 @@ impl Window {
 
         let scale_factor = self.scale_factor();
         let content_mask = self.snapped_content_mask();
-        let opacity = self.element_opacity_for_bounds(&bounds);
         let element_bounds = self.cover_bounds(bounds);
         let element_corner_radii = corner_radii.scale(scale_factor);
         for shadow in shadows {
@@ -4686,6 +4860,8 @@ impl Window {
                 continue;
             }
             let shadow_bounds = (bounds + shadow.offset).dilate(shadow.spread_radius);
+            let painted_bounds = shadow_bounds.dilate(shadow.blur_radius * 3.0);
+            let opacity = self.element_opacity_for_visible_bounds(&painted_bounds);
             self.next_frame.scene.insert_primitive(Shadow {
                 order: 0,
                 blur_radius: shadow.blur_radius.scale(scale_factor),
@@ -4714,7 +4890,6 @@ impl Window {
 
         let scale_factor = self.scale_factor();
         let content_mask = self.snapped_content_mask();
-        let opacity = self.element_opacity_for_bounds(&bounds);
         let element_bounds = self.cover_bounds(bounds);
         let element_corner_radii = corner_radii.scale(scale_factor);
         for shadow in shadows {
@@ -4722,6 +4897,7 @@ impl Window {
                 continue;
             }
             let hole = (bounds + shadow.offset).dilate(-shadow.spread_radius);
+            let opacity = self.element_opacity_for_visible_bounds(&bounds);
             // Clamp at zero so a large spread can't produce negative radii, which would
             // break the SDF in the shader.
             let zero = Pixels::ZERO;
@@ -4940,7 +5116,7 @@ impl Window {
 
         let opacity = self.element_opacity_at(quad.bounds.center());
         let background = self
-            .quad_fade_gradient(quad.bounds, &quad.background)
+            .edge_fade_gradient(quad.bounds, &quad.background)
             .unwrap_or_else(|| quad.background.opacity(opacity));
         let snapped_bounds = self.snap_bounds(quad.bounds);
         let snapped_border_widths = self.snap_border_widths(quad.border_widths);
@@ -5014,10 +5190,14 @@ impl Window {
 
         let scale_factor = self.scale_factor();
         let content_mask = self.content_mask();
-        let opacity = self.element_opacity_for_bounds(&path.bounds);
+        let shader_bounds = path.bounds.intersect(&content_mask.bounds);
         path.content_mask = content_mask;
         let color: Background = color.into();
-        path.color = color.opacity(opacity);
+        path.color = self
+            .edge_fade_gradient(shader_bounds, &color)
+            .unwrap_or_else(|| {
+                color.opacity(self.element_opacity_for_visible_bounds(&shader_bounds))
+            });
         self.next_frame
             .scene
             .insert_primitive(path.scale(scale_factor));
@@ -5289,7 +5469,7 @@ impl Window {
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
-        let element_opacity = self.element_opacity_for_bounds(&bounds);
+        let element_opacity = self.element_opacity_for_visible_bounds(&bounds);
         let bounds = self.snap_bounds(bounds);
 
         let params = RenderSvgParams {
@@ -5493,8 +5673,8 @@ impl Window {
                     .transform_bounds(bounds)
                     .map(|coordinate| px(coordinate.0 / scale_factor))
             });
-            let opacity =
-                instance.opacity.clamp(0.0, 1.0) * self.element_opacity_for_bounds(&fade_bounds);
+            let opacity = instance.opacity.clamp(0.0, 1.0)
+                * self.element_opacity_for_visible_bounds(&fade_bounds);
             if opacity <= 0.0 {
                 continue;
             }
@@ -5529,61 +5709,6 @@ impl Window {
         Ok(())
     }
 
-    /// Paints a renderer-owned image directly into the scene.
-    pub fn paint_external_image(
-        &mut self,
-        bounds: Bounds<Pixels>,
-        image_bounds: Bounds<Pixels>,
-        corner_radii: Corners<Pixels>,
-        image: Arc<ExternalImageHandle>,
-        grayscale: bool,
-    ) {
-        self.invalidator.debug_assert_paint();
-
-        let image_size = image.size();
-        let Some((visible_bounds, source)) = visible_image_region(bounds, image_bounds, image_size)
-        else {
-            return;
-        };
-        let opacity = self.element_opacity_for_bounds(&bounds);
-        if opacity <= 0.0 {
-            return;
-        }
-
-        self.next_frame.scene.insert_primitive(PaintExternalImage {
-            image,
-            sprite: PolychromeSprite {
-                order: 0,
-                blend_mode: crate::SpriteBlendMode::Normal,
-                color_mode: if grayscale {
-                    SpriteColorMode::Grayscale
-                } else {
-                    SpriteColorMode::Color
-                },
-                sample_inset: (source.origin != Point::default() || source.size != image_size)
-                    .into(),
-                bounds: self.snap_bounds(visible_bounds),
-                content_mask: self.snapped_content_mask(),
-                corner_radii: corner_radii
-                    .clamp_radii_for_quad_size(visible_bounds.size)
-                    .scale(self.scale_factor()),
-                tile: AtlasTile {
-                    texture_id: AtlasTextureId {
-                        index: 0,
-                        kind: AtlasTextureKind::Polychrome,
-                    },
-                    tile_id: TileId(0),
-                    padding: 0,
-                    bounds: source,
-                },
-                transformation: TransformationMatrix::unit(),
-                tint: crate::white(),
-                opacity,
-                pad: 0,
-            },
-        });
-    }
-
     /// Paint an image into the scene for the next frame at the current z-index.
     /// This method will panic if the frame_index is not valid.
     ///
@@ -5607,10 +5732,47 @@ impl Window {
             frame_index < data.frame_count(),
             "It's the caller's job to pass a valid frame index"
         );
-        let frame_size = data.size(frame_index);
-        let Some((visible_bounds, source)) = visible_image_region(bounds, image_bounds, frame_size)
-        else {
+        let visible_bounds = bounds.intersect(&image_bounds);
+        if visible_bounds.size.width <= Pixels::ZERO || visible_bounds.size.height <= Pixels::ZERO {
             return Ok(());
+        }
+        if image_bounds.size.width <= Pixels::ZERO || image_bounds.size.height <= Pixels::ZERO {
+            return Ok(());
+        }
+
+        let frame_size = data.size(frame_index);
+        let source = if visible_bounds == image_bounds {
+            Bounds {
+                origin: Point::default(),
+                size: frame_size,
+            }
+        } else {
+            let x_offset_ratio =
+                (visible_bounds.origin.x - image_bounds.origin.x) / image_bounds.size.width;
+            let y_offset_ratio =
+                (visible_bounds.origin.y - image_bounds.origin.y) / image_bounds.size.height;
+            let width_ratio = visible_bounds.size.width / image_bounds.size.width;
+            let height_ratio = visible_bounds.size.height / image_bounds.size.height;
+
+            let sub_origin_x = (x_offset_ratio * frame_size.width.0 as f32).round() as i32;
+            let sub_origin_y = (y_offset_ratio * frame_size.height.0 as f32).round() as i32;
+            let sub_width = (width_ratio * frame_size.width.0 as f32).round() as i32;
+            let sub_height = (height_ratio * frame_size.height.0 as f32).round() as i32;
+
+            let clamped_origin_x = sub_origin_x.clamp(0, frame_size.width.0);
+            let clamped_origin_y = sub_origin_y.clamp(0, frame_size.height.0);
+            let clamped_width = sub_width.min(frame_size.width.0 - clamped_origin_x).max(0);
+            let clamped_height = sub_height
+                .min(frame_size.height.0 - clamped_origin_y)
+                .max(0);
+
+            Bounds {
+                origin: point(
+                    DevicePixels(clamped_origin_x),
+                    DevicePixels(clamped_origin_y),
+                ),
+                size: size(DevicePixels(clamped_width), DevicePixels(clamped_height)),
+            }
         };
 
         let corner_radii = corner_radii.clamp_radii_for_quad_size(visible_bounds.size);
@@ -6086,11 +6248,13 @@ impl Window {
             .unwrap_or_else(|| action.name().to_string())
     }
 
-    /// Dispatch a mouse or keyboard event on the window.
+    /// Dispatch a mouse, keyboard, or touch event on the window.
     #[profiling::function]
     pub fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
-        #[cfg(feature = "input-latency-histogram")]
-        let dispatch_time = Instant::now();
+        let frame_trace_generation = profiler::frame_trace_generation();
+        let dispatch_time = (frame_trace_generation.is_some()
+            || cfg!(feature = "input-latency-histogram"))
+        .then(Instant::now);
         let update_count_before = self.invalidator.update_count();
         // Track input modality for focus-visible styling and hover suppression.
         // Hover is suppressed during keyboard modality so that keyboard navigation
@@ -6099,7 +6263,9 @@ impl Window {
         self.last_input_modality = match &event {
             PlatformInput::KeyDown(_) => InputModality::Keyboard,
             PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
-            PlatformInput::Touch(_) => InputModality::Touch,
+            PlatformInput::Touch(_) | PlatformInput::LongPress(_) | PlatformInput::TouchDrag(_) => {
+                InputModality::Touch
+            }
             _ => self.last_input_modality,
         };
         if self.last_input_modality != old_modality {
@@ -6251,13 +6417,43 @@ impl Window {
                 }
             },
             PlatformInput::Touch(touch) => PlatformInput::Touch(touch),
-            PlatformInput::KeyDown(_) | PlatformInput::KeyUp(_) => event,
+            PlatformInput::LongPress(long_press) => {
+                self.mouse_position = if long_press.phase == crate::TouchPhase::Started {
+                    long_press.start_position
+                } else {
+                    long_press.position
+                };
+                if long_press.phase == crate::TouchPhase::Started {
+                    self.long_press_capture = None;
+                }
+                PlatformInput::LongPress(long_press)
+            }
+            PlatformInput::TouchDrag(touch_drag) => {
+                self.mouse_position = touch_drag.start_position;
+                PlatformInput::TouchDrag(touch_drag)
+            }
+            PlatformInput::KeyDown(_)
+            | PlatformInput::KeyUp(_)
+            | PlatformInput::MouseCancelled(_) => event,
         };
 
         if let Some(any_mouse_event) = event.mouse_event() {
             self.dispatch_mouse_event(any_mouse_event, cx);
         } else if let Some(any_key_event) = event.keyboard_event() {
             self.dispatch_key_event(any_key_event, cx);
+        } else if let Some(touch_event) = event.touch_event() {
+            self.dispatch_touch_event(touch_event, cx);
+        }
+        if let PlatformInput::LongPress(long_press) = &event {
+            match long_press.phase {
+                crate::TouchPhase::Started if !self.default_prevented => {
+                    self.long_press_capture = None;
+                }
+                crate::TouchPhase::Ended | crate::TouchPhase::Cancelled => {
+                    self.long_press_capture = None;
+                }
+                crate::TouchPhase::Started | crate::TouchPhase::Moved => {}
+            }
         }
 
         // Must run after the move is dispatched: the platform owns the gesture afterwards, so this
@@ -6266,10 +6462,18 @@ impl Window {
 
         if self.invalidator.update_count() > update_count_before {
             self.input_rate_tracker.borrow_mut().record_input();
-            #[cfg(feature = "input-latency-histogram")]
             if self.invalidator.not_drawing() {
-                self.input_latency_tracker.record_input(dispatch_time);
+                if let (Some(trace_generation), Some(dispatch_time)) =
+                    (frame_trace_generation, dispatch_time)
+                {
+                    self.frame_inputs.record(trace_generation, dispatch_time);
+                }
+                #[cfg(feature = "input-latency-histogram")]
+                self.input_latency_tracker.record_input(
+                    dispatch_time.expect("latency feature records a dispatch timestamp"),
+                );
             } else {
+                #[cfg(feature = "input-latency-histogram")]
                 self.input_latency_tracker.record_mid_draw_input();
             }
         }
@@ -6278,6 +6482,141 @@ impl Window {
             propagate: cx.propagate_event,
             default_prevented: self.default_prevented,
         }
+    }
+
+    /// Whether recognized touch pans may use the platform's predicted touch
+    /// positions ([`TouchEvent::predicted_position`]) to compensate for input
+    /// latency. Defaults to true.
+    pub fn touch_prediction_enabled(&self) -> bool {
+        self.touch_prediction_enabled
+    }
+
+    /// Sets whether recognized touch pans may use the platform's predicted
+    /// touch positions. Disabling drops [`TouchEvent::predicted_position`]
+    /// before gesture recognition, so pans track only raw touch positions.
+    pub fn set_touch_prediction_enabled(&mut self, enabled: bool) {
+        self.touch_prediction_enabled = enabled;
+    }
+
+    /// Runs the portable gesture recognizer over a raw touch event and
+    /// dispatches its semantic scroll, tap, drag, or long-press events through
+    /// the ordinary mouse-event path.
+    fn dispatch_touch_event(&mut self, event: &TouchEvent, cx: &mut App) {
+        let mut event = event.clone();
+        if !self.touch_prediction_enabled {
+            event.predicted_position = None;
+        }
+        let recognized_gestures = self.touch_gestures.handle_event(&event);
+        if event.phase == crate::TouchPhase::Started
+            && let Some(touch_drag) = self.touch_gestures.offer_touch_drag(event.id)
+        {
+            self.dispatch_recognized_touch_gesture(touch_drag, cx);
+        }
+        if event.phase == crate::TouchPhase::Started
+            && self.touch_gestures.pending_long_press().is_some()
+        {
+            self.long_press_capture = None;
+        }
+        let mut tapped = false;
+        for gesture in recognized_gestures {
+            tapped |= matches!(gesture, RecognizedTouchGesture::Tap { .. });
+            self.dispatch_recognized_touch_gesture(gesture, cx);
+        }
+        if event.phase == crate::TouchPhase::Started {
+            self.schedule_long_press_timer(cx);
+        } else if self.touch_gestures.pending_long_press().is_none() {
+            self.long_press_timer.take();
+        }
+        // A platform touch-release handler may inspect the input handler as
+        // soon as dispatch returns (for example to decide virtual-keyboard
+        // visibility). Draw now so a tap's focus change is reflected there.
+        if tapped && self.invalidator.is_dirty() {
+            self.draw(cx).clear(cx);
+        }
+        if self.touch_gestures.has_momentum() {
+            self.schedule_touch_momentum_tick();
+        }
+    }
+
+    fn dispatch_recognized_touch_gesture(&mut self, gesture: RecognizedTouchGesture, cx: &mut App) {
+        match gesture {
+            RecognizedTouchGesture::Scroll(scroll_wheel) => {
+                self.mouse_position = scroll_wheel.position;
+                cx.propagate_event = true;
+                self.dispatch_mouse_event(&scroll_wheel, cx);
+            }
+            RecognizedTouchGesture::Tap { down, up } => {
+                self.mouse_position = up.position;
+                cx.propagate_event = true;
+                self.dispatch_mouse_event(&down, cx);
+                cx.propagate_event = true;
+                self.dispatch_mouse_event(&up, cx);
+            }
+            RecognizedTouchGesture::TouchDrag(touch_drag) => {
+                self.mouse_position = touch_drag.start_position;
+                cx.propagate_event = true;
+                self.default_prevented = false;
+                let started = touch_drag.phase == crate::TouchPhase::Started;
+                self.dispatch_mouse_event(&touch_drag, cx);
+                if started {
+                    self.touch_gestures
+                        .resolve_touch_drag(self.default_prevented);
+                }
+            }
+            RecognizedTouchGesture::LongPress(long_press) => {
+                self.mouse_position = if long_press.phase == crate::TouchPhase::Started {
+                    long_press.start_position
+                } else {
+                    long_press.position
+                };
+                cx.propagate_event = true;
+                self.default_prevented = false;
+                let started = long_press.phase == crate::TouchPhase::Started;
+                let ended = matches!(
+                    long_press.phase,
+                    crate::TouchPhase::Ended | crate::TouchPhase::Cancelled
+                );
+                self.dispatch_mouse_event(&long_press, cx);
+                if started {
+                    let claimed = self.default_prevented;
+                    self.touch_gestures.resolve_long_press(claimed);
+                    if !claimed {
+                        self.long_press_capture = None;
+                    }
+                }
+                if ended {
+                    self.long_press_capture = None;
+                }
+            }
+        }
+    }
+
+    fn schedule_long_press_timer(&mut self, cx: &mut App) {
+        self.long_press_timer.take();
+        let Some((touch_id, duration)) = self.touch_gestures.pending_long_press() else {
+            return;
+        };
+        self.long_press_timer = Some(self.spawn(cx, async move |cx| {
+            cx.background_executor.timer(duration).await;
+            cx.update(move |window, cx| {
+                window.long_press_timer.take();
+                if let Some(gesture) = window.touch_gestures.offer_long_press(touch_id) {
+                    window.dispatch_recognized_touch_gesture(gesture, cx);
+                }
+            })
+            .log_err();
+        }));
+    }
+
+    fn schedule_touch_momentum_tick(&mut self) {
+        self.on_next_frame(|window, cx| {
+            if let Some(gesture) = window.touch_gestures.tick_momentum() {
+                window.dispatch_recognized_touch_gesture(gesture, cx);
+            }
+            if window.touch_gestures.has_momentum() {
+                window.schedule_touch_momentum_tick();
+            }
+        });
     }
 
     fn promote_external_drag_to_platform(&mut self, event: &PlatformInput, cx: &mut App) {
@@ -6311,6 +6650,7 @@ impl Window {
     }
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
+        let cancelled = event.is::<crate::MouseCancelEvent>();
         let hit_test = self.rendered_frame.hit_test(self.mouse_position());
         if hit_test != self.mouse_hit_test {
             self.mouse_hit_test = hit_test;
@@ -6318,7 +6658,7 @@ impl Window {
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
-        if self.is_inspector_picking(cx) {
+        if !cancelled && self.is_inspector_picking(cx) {
             self.handle_inspector_mouse_event(event, cx);
             // When inspector is picking, all other mouse handling is skipped.
             return;
@@ -6333,19 +6673,19 @@ impl Window {
                 .as_mut()
                 .expect("required framework invariant must hold");
             listener(event, DispatchPhase::Capture, self, cx);
-            if !cx.propagate_event {
+            if !cx.propagate_event && !cancelled {
                 break;
             }
         }
 
         // Bubble phase, where most normal handlers do their work.
-        if cx.propagate_event {
+        if cx.propagate_event || cancelled {
             for listener in mouse_listeners.iter_mut().rev() {
                 let listener = listener
                     .as_mut()
                     .expect("required framework invariant must hold");
                 listener(event, DispatchPhase::Bubble, self, cx);
-                if !cx.propagate_event {
+                if !cx.propagate_event && !cancelled {
                     break;
                 }
             }
@@ -6358,7 +6698,11 @@ impl Window {
                 // If this was a mouse move event, redraw the window so that the
                 // active drag can follow the mouse cursor.
                 self.refresh();
-            } else if event.is::<MouseUpEvent>() {
+            } else if cancelled
+                || event
+                    .downcast_ref::<MouseUpEvent>()
+                    .is_some_and(|up| up.button == MouseButton::Left)
+            {
                 // If this was a mouse up event, cancel the active drag and redraw
                 // the window.
                 cx.active_drag = None;
@@ -6366,10 +6710,17 @@ impl Window {
             }
         }
 
-        // Auto-release pointer capture on mouse up
-        if event.is::<MouseUpEvent>() && self.captured_hitbox.is_some() {
-            self.captured_hitbox = None;
-            self.captured_pointer_element = None;
+        if cancelled {
+            self.document_selection.end_drag();
+            self.refresh();
+        }
+        if cancelled
+            || event.downcast_ref::<MouseUpEvent>().is_some_and(|up| {
+                self.captured_pointer_button
+                    .is_none_or(|button| button == up.button)
+            })
+        {
+            self.release_pointer();
         }
     }
 
@@ -8013,20 +8364,23 @@ mod tests {
         cell::{Cell, RefCell},
         path::PathBuf,
         rc::Rc,
+        time::Duration,
     };
 
     use crate::{
-        AnyWindowHandle, AppContext as _, Bounds, Context, DragMoveEvent, Empty, Entity,
-        ExternalDragPayload, ExternalDrop, ExternalDropData, ExternalDropEvent, ExternalDropItem,
-        ExternalImage, ExternalPaths, FileDragPaths, FileDropEvent, FocusHandle, FontId,
-        ImageFormat, InputEvent as _, InteractiveElement as _, IntoElement, MouseButton,
-        MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render, RequestFrameOptions,
-        StatefulInteractiveElement as _, StyleRefinement, Styled, TestAppContext,
-        TextRenderingMode, Window, WindowAppearance, WindowControlArea, WindowOptions, canvas,
-        deferred, div, point, px, size,
+        AnyWindowHandle, AppContext as _, BackgroundTag, Bounds, BoxShadow, ContentMask, Context,
+        DragMoveEvent, EdgeFade, Empty, Entity, ExternalDragPayload, ExternalDrop,
+        ExternalDropData, ExternalDropEvent, ExternalDropItem, ExternalImage, ExternalPaths,
+        FileDragPaths, FileDropEvent, FocusHandle, FontId, FrameSubmissionTimingCollector,
+        FrameTraceLease, ImageFormat, InputEvent as _, InteractiveElement as _, IntoElement,
+        LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Path, Pixels,
+        Point, Render, RequestFrameOptions, StatefulInteractiveElement as _, StyleRefinement,
+        Styled, TestAppContext, TextRenderingMode, TouchDragEvent, TouchEvent, TouchId, TouchPhase,
+        Window, WindowAppearance, WindowControlArea, WindowOptions, canvas, deferred, div, point,
+        px, size, white,
     };
 
-    use super::window_control_at_mouse;
+    use super::{DispatchPhase, window_control_at_mouse};
 
     struct EmptyView;
 
@@ -8034,6 +8388,91 @@ mod tests {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             div()
         }
+    }
+
+    #[gpui::test]
+    fn edge_fade_keeps_tall_shadow_and_path_visible(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let fade_bounds = Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(100.), px(100.)),
+        };
+        let tall_bounds = Bounds {
+            origin: point(px(10.), px(10.)),
+            size: size(px(80.), px(120.)),
+        };
+        let small_bounds = Bounds {
+            origin: point(px(10.), px(85.)),
+            size: size(px(20.), px(10.)),
+        };
+
+        window.draw(
+            point(px(0.), px(0.)),
+            size(px(100.), px(100.)),
+            move |_, _| {
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        let fade = EdgeFade {
+                            bounds: fade_bounds,
+                            band: px(20.),
+                            top: false,
+                            bottom: true,
+                            left: false,
+                            right: false,
+                        };
+                        window.with_content_mask(
+                            Some(ContentMask {
+                                bounds: fade_bounds,
+                            }),
+                            |window| {
+                                window.with_edge_fade(Some(fade), |window| {
+                                    let shadow = BoxShadow::new(px(0.), px(0.), white());
+                                    window.paint_drop_shadows(
+                                        tall_bounds,
+                                        Default::default(),
+                                        std::slice::from_ref(&shadow),
+                                    );
+                                    window.paint_drop_shadows(
+                                        small_bounds,
+                                        Default::default(),
+                                        std::slice::from_ref(&shadow),
+                                    );
+
+                                    let mut path = Path::new(tall_bounds.origin);
+                                    path.line_to(tall_bounds.top_right());
+                                    path.line_to(tall_bounds.bottom_right());
+                                    path.line_to(tall_bounds.bottom_left());
+                                    path.line_to(tall_bounds.origin);
+                                    window.paint_path(path, white());
+                                });
+                            },
+                        );
+                    },
+                )
+                .size_full()
+                .into_any_element()
+            },
+        );
+
+        window.update(|window, _| {
+            let scene = &window.rendered_frame.scene;
+            assert_eq!(scene.shadows.len(), 2);
+            assert!(
+                scene.shadows[0].color.a > 0.0,
+                "a tall shadow crossing the fade edge must remain visible"
+            );
+            assert!(
+                (scene.shadows[1].color.a - 0.25).abs() < f32::EPSILON,
+                "a primitive smaller than the band keeps nearest-edge fading"
+            );
+
+            let path = scene.paths.last().expect("the tall path should be painted");
+            assert_eq!(path.color.tag, BackgroundTag::LinearGradient);
+            let stops = &path.color.colors[..path.color.color_stop_count as usize];
+            assert!(stops.iter().any(|stop| stop.color.a > 0.0));
+            assert!(stops.iter().any(|stop| stop.color.a == 0.0));
+        });
     }
 
     struct CountRenders(Rc<Cell<usize>>);
@@ -8861,5 +9300,253 @@ mod tests {
             })
             .expect("required framework invariant must hold");
         assert_eq!(b_focus_count.get(), 1);
+    }
+
+    #[gpui::test]
+    fn claimed_touch_drag_receives_movement_and_release(cx: &mut TestAppContext) {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let events = events.clone();
+            move |_, _| TouchDragListener { events }
+        });
+        let touch = TouchId(1);
+
+        dispatch_touch(window, cx, touch, TouchPhase::Started, 10.);
+        dispatch_touch(window, cx, touch, TouchPhase::Moved, 30.);
+        dispatch_touch(window, cx, touch, TouchPhase::Ended, 40.);
+
+        assert_eq!(
+            events.borrow().as_slice(),
+            [
+                (TouchPhase::Started, px(10.)),
+                (TouchPhase::Moved, px(30.)),
+                (TouchPhase::Ended, px(40.)),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn synthesized_touch_gestures_do_not_duplicate_input_submission_samples(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let _lease = FrameTraceLease::new();
+        let mut collector = FrameSubmissionTimingCollector::new();
+
+        dispatch_touch(window, cx, TouchId(1), TouchPhase::Started, 10.);
+        dispatch_touch(window, cx, TouchId(1), TouchPhase::Ended, 10.);
+        let draw_start = window
+            .update(cx, |_, window, _| {
+                assert!(
+                    window.needs_present.get(),
+                    "tap should have drawn its dirty frame"
+                );
+                let draw_start = window
+                    .pending_frame_timing
+                    .expect("touch frame is traced")
+                    .timing
+                    .draw_start;
+                window.present();
+                draw_start
+            })
+            .expect("window remains available");
+
+        // The collector is process-global; concurrent TestApps can allocate
+        // the same WindowId. Identify this submitted frame, not another app's.
+        let samples = collector
+            .collect_unseen()
+            .into_iter()
+            .filter(|timing| {
+                timing.frame.window_id == window.window_id()
+                    && timing.frame.draw_start == draw_start
+            })
+            .collect::<Vec<_>>();
+        let [sample] = samples.as_slice() else {
+            panic!("expected one submitted touch frame, got {samples:?}");
+        };
+        assert!(sample.first_input_at.is_some());
+        assert_eq!(
+            sample.input_events, 1,
+            "the semantic drag/tap events synthesized inside raw-touch dispatch are not top-level inputs"
+        );
+    }
+
+    struct TouchDragListener {
+        events: Rc<RefCell<Vec<(TouchPhase, Pixels)>>>,
+    }
+
+    impl Render for TouchDragListener {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let events = self.events.clone();
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    window.on_mouse_event(move |event: &TouchDragEvent, phase, window, _cx| {
+                        if phase != DispatchPhase::Bubble {
+                            return;
+                        }
+                        events.borrow_mut().push((event.phase, event.position.x));
+                        if event.phase == TouchPhase::Started {
+                            window.prevent_default();
+                        }
+                    });
+                },
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn long_press_is_claimed_only_when_started_prevents_default(cx: &mut TestAppContext) {
+        for response in [
+            LongPressResponse::PreventDefault,
+            LongPressResponse::StopPropagation,
+            LongPressResponse::None,
+        ] {
+            let phases = Rc::new(RefCell::new(Vec::new()));
+            let window = cx.add_window({
+                let phases = phases.clone();
+                move |_, _| LongPressListener { phases, response }
+            });
+            dispatch_touch(window, cx, TouchId(1), TouchPhase::Started, 0.);
+            cx.executor().advance_clock(Duration::from_millis(501));
+            cx.executor().run_until_parked();
+            window
+                .update(cx, |_, window, _| {
+                    assert_eq!(
+                        window.long_press_capture.is_some(),
+                        response == LongPressResponse::PreventDefault
+                    );
+                })
+                .expect("required framework invariant must hold");
+            dispatch_touch(window, cx, TouchId(1), TouchPhase::Moved, 2.);
+            dispatch_touch(window, cx, TouchId(1), TouchPhase::Ended, 2.);
+            window
+                .update(cx, |_, window, _| {
+                    assert!(window.long_press_capture.is_none());
+                })
+                .expect("required framework invariant must hold");
+
+            let phases = phases.borrow();
+            if response == LongPressResponse::PreventDefault {
+                assert_eq!(
+                    phases.as_slice(),
+                    [TouchPhase::Started, TouchPhase::Moved, TouchPhase::Ended]
+                );
+            } else {
+                assert_eq!(phases.as_slice(), [TouchPhase::Started]);
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn resolved_touch_cancels_scheduled_long_press(cx: &mut TestAppContext) {
+        for (phase, position) in [
+            (TouchPhase::Ended, 0.),
+            (TouchPhase::Cancelled, 0.),
+            (TouchPhase::Moved, 20.),
+        ] {
+            let phases = Rc::new(RefCell::new(Vec::new()));
+            let window = cx.add_window({
+                let phases = phases.clone();
+                move |_, _| LongPressListener {
+                    phases,
+                    response: LongPressResponse::PreventDefault,
+                }
+            });
+            dispatch_touch(window, cx, TouchId(1), TouchPhase::Started, 0.);
+            dispatch_touch(window, cx, TouchId(1), phase, position);
+            cx.executor().advance_clock(Duration::from_millis(501));
+            cx.executor().run_until_parked();
+
+            assert!(phases.borrow().is_empty(), "{phase:?} allowed long press");
+        }
+    }
+
+    #[gpui::test]
+    fn stale_long_press_timer_cannot_affect_replacement_touch(cx: &mut TestAppContext) {
+        let phases = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let phases = phases.clone();
+            move |_, _| LongPressListener {
+                phases,
+                response: LongPressResponse::PreventDefault,
+            }
+        });
+        let first_touch = TouchId(1);
+        dispatch_touch(window, cx, first_touch, TouchPhase::Started, 0.);
+        cx.executor().advance_clock(Duration::from_millis(250));
+        dispatch_touch(window, cx, first_touch, TouchPhase::Cancelled, 0.);
+        dispatch_touch(window, cx, TouchId(2), TouchPhase::Started, 10.);
+
+        cx.executor().advance_clock(Duration::from_millis(251));
+        cx.executor().run_until_parked();
+        assert!(phases.borrow().is_empty());
+
+        cx.executor().advance_clock(Duration::from_millis(250));
+        cx.executor().run_until_parked();
+        assert_eq!(phases.borrow().as_slice(), [TouchPhase::Started]);
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum LongPressResponse {
+        PreventDefault,
+        StopPropagation,
+        None,
+    }
+
+    struct LongPressListener {
+        phases: Rc<RefCell<Vec<TouchPhase>>>,
+        response: LongPressResponse,
+    }
+
+    impl Render for LongPressListener {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let entity = cx.entity();
+            let phases = self.phases.clone();
+            let response = self.response;
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Bubble {
+                            return;
+                        }
+                        phases.borrow_mut().push(event.phase);
+                        match response {
+                            LongPressResponse::PreventDefault => {
+                                window.capture_long_press(&entity);
+                                window.prevent_default();
+                            }
+                            LongPressResponse::StopPropagation => cx.stop_propagation(),
+                            LongPressResponse::None => {}
+                        }
+                    });
+                },
+            )
+        }
+    }
+
+    fn dispatch_touch<T: 'static>(
+        window: crate::WindowHandle<T>,
+        cx: &mut TestAppContext,
+        id: TouchId,
+        phase: TouchPhase,
+        x: f32,
+    ) {
+        window
+            .update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    TouchEvent {
+                        id,
+                        phase,
+                        position: point(px(x), px(0.)),
+                        predicted_position: None,
+                        force: None,
+                    }
+                    .to_platform_input(),
+                    cx,
+                );
+            })
+            .expect("required framework invariant must hold");
     }
 }

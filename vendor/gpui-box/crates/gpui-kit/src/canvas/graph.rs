@@ -38,15 +38,21 @@ use crate::strings::{ActiveStrings, StringKey};
 use super::band::GraphBand;
 use super::edge::{
     Anchor, Axis, EdgeColors, EdgePaint, EdgeState, GraphEdge, GraphEndpoint, GraphRouting,
-    OrthogonalRoute, PortSide, RouteTransform, paint_route, paint_route_stroke, route_curved,
-    route_curved_preview, route_orthogonal, route_preview,
+    OrthogonalRoute, PortSide, RouteMetrics, RouteTransform, paint_route, paint_route_stroke,
+    route_curved, route_curved_preview, route_orthogonal, route_preview,
 };
 use super::minimap::{MinimapView, bounded_view};
-use super::node::{GraphNode, GraphPort, PortDirection};
+use super::node::{GraphNode, GraphPort, PortDirection, PortType, port_measure_id};
 use super::toolbar::CanvasToolbar;
+use super::{PORT_MARK_SCALE, composite_id};
 
 /// The spacing of the dot grid behind the canvas, in pixels.
 const GRID_STEP: f32 = 24.0;
+/// How much of a port's ring its type glyph fills.
+const PORT_GLYPH_SCALE: f32 = 0.62;
+/// The narrowest a node may be dragged to, in graph units: room for a badge,
+/// a short name, and a state mark.
+const MIN_NODE_WIDTH: f32 = 120.0;
 /// Below this zoom a node draws only its title, and ports stay off.
 const LOD_ZOOM: f32 = 0.4;
 /// Extra world space kept around the viewport so a node entering does not pop.
@@ -92,6 +98,12 @@ pub enum NodeGraphEvent {
         id: SharedString,
         position: Point<f32>,
     },
+    /// Proposes a new world-space size for a node, from its resize handle.
+    ///
+    /// The graph keeps drawing the node at the size the caller last placed
+    /// it at; a caller that accepts the proposal places it with
+    /// [`Placed::height`] and [`GraphNode::width`] at the reported size.
+    NodeResized { id: SharedString, size: Size<f32> },
     /// Proposes deleting a node by business identity.
     NodeDeleted { id: SharedString },
     /// Reports a press that landed on the canvas itself rather than on any
@@ -165,6 +177,11 @@ enum Gesture {
         from: GraphEndpoint,
         direction: PortDirection,
     },
+    Resize {
+        at: Point<Pixels>,
+        id: SharedString,
+        size: Size<f32>,
+    },
     Marquee {
         origin: Point<Pixels>,
         current: Point<Pixels>,
@@ -174,10 +191,17 @@ enum Gesture {
 #[derive(Debug, Default)]
 struct GestureState {
     gesture: Option<Gesture>,
+    interaction: Option<GraphInteraction>,
     pointer: Option<Point<Pixels>>,
     animation_started: Option<Instant>,
     /// The visible colour crossover for each caller-owned edge.
     edge_transitions: HashMap<SharedString, EdgeTransition>,
+    /// Ids used to age edge-local paint history. Rebuilt only when the
+    /// caller-owned edge identities change.
+    edge_ids: EdgeIdentityCache,
+    /// Estimated card boxes shared by marquee and context-menu hit testing.
+    /// Event handlers outlive this render, so they retain one immutable set.
+    interaction_nodes: InteractionNodeCache,
     /// The last frame this canvas proposed. Kept beside the gesture because it
     /// is the same kind of fact: what this one canvas has been through, not
     /// what the caller asked for.
@@ -216,6 +240,53 @@ struct GestureState {
     /// Recording what was proposed is how the two are told apart exactly,
     /// rather than by guessing from how far the viewport moved.
     direct: Option<GraphViewport>,
+}
+
+#[derive(Debug, Default)]
+struct EdgeIdentityCache {
+    signature: Option<u64>,
+    ids: HashSet<SharedString>,
+}
+
+impl EdgeIdentityCache {
+    fn update(&mut self, edges: &[GraphEdge]) {
+        let signature = edge_identity_signature(edges);
+        if self.signature != Some(signature) {
+            self.ids = edges.iter().map(GraphEdge::edge_id).collect();
+            self.signature = Some(signature);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct InteractionNodeCache {
+    signature: Option<u64>,
+    nodes: Rc<Vec<(SharedString, Bounds<f32>)>>,
+}
+
+impl InteractionNodeCache {
+    fn update(
+        &mut self,
+        nodes: &[Placed],
+        theme: &gpui_kit_theme::Theme,
+    ) -> Rc<Vec<(SharedString, Bounds<f32>)>> {
+        let signature = interaction_node_signature(nodes, theme);
+        if self.signature != Some(signature) {
+            self.nodes = Rc::new(
+                nodes
+                    .iter()
+                    .map(|placed| {
+                        (
+                            placed.node.ident().semantic_id(),
+                            placed.bounds(theme, None),
+                        )
+                    })
+                    .collect(),
+            );
+            self.signature = Some(signature);
+        }
+        Rc::clone(&self.nodes)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -687,11 +758,9 @@ fn frame_all(
             }
             let zoom = (available_width / (max.x - min.x).max(1.0))
                 .min(available_height / (max.y - min.y).max(1.0))
-                .clamp(zoom_range.0, zoom_range.1)
-                // Never magnify. A graph of three cards blown up to fill a
-                // panel reads as a mistake, and the reader can still zoom in
-                // themselves.
-                .min(1.0);
+                // Prefer native size, but the caller's legal range prevails.
+                .min(1.0)
+                .clamp(zoom_range.0, zoom_range.1);
             let available_center = point(
                 insets.left + (width - insets.left - insets.right) / 2.0,
                 insets.top + (height - insets.top - insets.bottom) / 2.0,
@@ -721,6 +790,15 @@ struct RelationshipLabelPlacement {
     /// at the edge, in which case the label slides just inside the surface
     /// rather than clipping its words.
     shown: Bounds<f32>,
+    /// The point on the route the label was seated against.
+    ///
+    /// The search is free to slide a label along its route and to stack it
+    /// outward, which is what keeps annotations off cards and off each other.
+    /// What it cannot do is keep every answer next to the line it describes,
+    /// so where the label ends up is not on its own enough to say whose it is.
+    /// Keeping the point it was seated against is what lets the canvas draw
+    /// that ownership instead of leaving a reader to infer it from proximity.
+    anchor: Point<f32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -790,6 +868,49 @@ fn clamp_relationship_label(bounds: Bounds<f32>, surface: Bounds<f32>) -> Bounds
         ),
         bounds.size,
     )
+}
+
+/// How thick the run joining a displaced label to its route is drawn, in world
+/// units. A hairline: it is there to be followed, not to be read as a wire.
+const RELATIONSHIP_LEADER_WIDTH: f32 = 1.0;
+
+/// The axis-aligned runs joining a seated label to its point on its route.
+///
+/// Empty while the label is against its route, which is the seat the search
+/// tries first: a leader under a label already touching its own line is a mark
+/// that says nothing, drawn in the busiest part of the canvas. Past that one
+/// gap the label has been moved — slid along the route, stacked outward, or
+/// pushed inside the surface — and how far it went is not something a reader
+/// can recover by looking. So the rule is the gap itself: touching needs no
+/// tie, and everything else gets one.
+///
+/// The path is an L rather than a diagonal so it reads as drawing chrome
+/// instead of as one more wire on a board made of wires, and so it can be
+/// painted as two rectangles at any zoom without a path.
+fn relationship_leader(anchor: Point<f32>, label: Bounds<f32>) -> Vec<Bounds<f32>> {
+    let near = point(
+        anchor.x.clamp(label.left(), label.right()),
+        anchor.y.clamp(label.top(), label.bottom()),
+    );
+    let (dx, dy) = (near.x - anchor.x, near.y - anchor.y);
+    if dx.hypot(dy) <= RELATIONSHIP_LABEL_GAP {
+        return Vec::new();
+    }
+    let half = RELATIONSHIP_LEADER_WIDTH * 0.5;
+    let mut runs = Vec::new();
+    if dx.abs() > f32::EPSILON {
+        runs.push(Bounds::new(
+            point(anchor.x.min(near.x), anchor.y - half),
+            size(dx.abs(), RELATIONSHIP_LEADER_WIDTH),
+        ));
+    }
+    if dy.abs() > f32::EPSILON {
+        runs.push(Bounds::new(
+            point(near.x - half, anchor.y.min(near.y)),
+            size(RELATIONSHIP_LEADER_WIDTH, dy.abs()),
+        ));
+    }
+    runs
 }
 
 fn relationship_label_candidate(
@@ -891,7 +1012,14 @@ fn place_relationship_labels(
                         side_rank,
                     };
                     if best.is_none_or(|(_, current)| score.better_than(current)) {
-                        best = Some((RelationshipLabelPlacement { desired, shown }, score));
+                        best = Some((
+                            RelationshipLabelPlacement {
+                                desired,
+                                shown,
+                                anchor: at,
+                            },
+                            score,
+                        ));
                     }
                 }
             }
@@ -1021,22 +1149,36 @@ fn route_signature(nodes: &[NodeGeometry], edges: &[GraphEdge]) -> u64 {
     hasher.finish()
 }
 
+fn edge_identity_signature(edges: &[GraphEdge]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    edges.len().hash(&mut hasher);
+    for edge in edges {
+        edge.edge_id().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn interaction_node_signature(nodes: &[Placed], theme: &gpui_kit_theme::Theme) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    nodes.len().hash(&mut hasher);
+    for placed in nodes {
+        placed.node.ident().semantic_id().hash(&mut hasher);
+        let bounds = placed.bounds(theme, None);
+        f32::to_bits(bounds.origin.x).hash(&mut hasher);
+        f32::to_bits(bounds.origin.y).hash(&mut hasher);
+        f32::to_bits(bounds.size.width).hash(&mut hasher);
+        f32::to_bits(bounds.size.height).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 fn viewport_value(state: &str, viewport: GraphViewport) -> String {
     format!(
         "state:{state};offset:{:.3},{:.3};zoom:{:.3}",
         viewport.offset.x, viewport.offset.y, viewport.zoom
     )
-}
-
-fn composite_id(prefix: &str, parts: &[&str]) -> SharedString {
-    let mut id = prefix.to_string();
-    for part in parts {
-        id.push(':');
-        id.push_str(&part.len().to_string());
-        id.push(':');
-        id.push_str(part);
-    }
-    id.into()
 }
 
 /// Places nodes in layers along the reading direction from a caller-owned
@@ -1124,6 +1266,11 @@ struct PortGeometry {
     id: SharedString,
     anchor: Anchor,
     direction: super::node::PortDirection,
+    /// The colour of the port's type, when it has one. A wire leaving this
+    /// port inherits it, so a reader follows a colour from socket to socket.
+    tint: Option<Hsla>,
+    /// The glyph of the port's type, drawn inside the ring.
+    glyph: Option<gpui_kit_assets::Icon>,
 }
 #[derive(Debug, Clone)]
 struct NodeGeometry {
@@ -1137,6 +1284,9 @@ struct NodeGeometry {
 struct RoutedEdge {
     edge: GraphEdge,
     route: OrthogonalRoute,
+    /// The colour the wire wears: the edge's own if it set one, else its
+    /// source port's type, else none and the kind decides.
+    tint: Option<Hsla>,
 }
 
 #[derive(Default)]
@@ -1259,6 +1409,7 @@ pub struct NodeGraph {
     empty: Option<EmptyState>,
     slots: Slots,
     grid: bool,
+    axes: bool,
     ground_light: bool,
     viewport: GraphViewport,
     zoom_range: (f32, f32),
@@ -1337,6 +1488,7 @@ impl NodeGraph {
             empty: None,
             slots: Slots::default(),
             grid: true,
+            axes: true,
             ground_light: true,
             viewport: GraphViewport::default(),
             zoom_range: (0.5, 2.0),
@@ -1404,6 +1556,18 @@ impl NodeGraph {
     /// has a texture of its own.
     pub fn grid(mut self, grid: bool) -> Self {
         self.grid = grid;
+        self
+    }
+
+    /// Turns off the two rules through the world origin while leaving the dot
+    /// grid in place.
+    ///
+    /// The axes say the origin is a landmark. That is useful on a diagram
+    /// whose positions carry meaning; a board whose cards were merely laid
+    /// out on a plane has no distinguished zero, so the rules would claim a
+    /// boundary the content does not have.
+    pub fn axes(mut self, axes: bool) -> Self {
+        self.axes = axes;
         self
     }
 
@@ -1518,13 +1682,20 @@ impl NodeGraph {
     /// The box of every node, by identity, for the edge painter.
     #[cfg(test)]
     fn geometry(&self, theme: &gpui_kit_theme::Theme) -> Vec<NodeGeometry> {
-        self.geometry_with_heights(theme, &HashMap::new())
+        self.geometry_with_heights(theme, &HashMap::new(), &HashMap::new())
     }
 
+    /// The box and sockets of every node.
+    ///
+    /// `port_rows` carries, per port measurement id, where the port's name
+    /// row sat below the card's top in graph units. A side port with a row
+    /// anchors at that row's middle; one without — a top or bottom port, or a
+    /// card not yet measured — divides its edge evenly with its siblings.
     fn geometry_with_heights(
         &self,
         theme: &gpui_kit_theme::Theme,
         measured_heights: &HashMap<SharedString, f32>,
+        port_rows: &HashMap<SharedString, f32>,
     ) -> Vec<NodeGeometry> {
         let node_counts = self
             .nodes
@@ -1565,20 +1736,22 @@ impl NodeGraph {
                             .collect();
                         let index = same.iter().position(|p| p.id() == port.id()).unwrap_or(0);
                         let fraction = (index + 1) as f32 / (same.len() + 1) as f32;
+                        let row_y = port_rows
+                            .get(&port_measure_id(&id, port.id()))
+                            .map(|offset| {
+                                (bounds.top() + offset).clamp(bounds.top(), bounds.bottom())
+                            })
+                            .unwrap_or(bounds.top() + bounds.size.height * fraction);
                         let anchor = match port.port_side() {
                             PortSide::Top => {
                                 point(bounds.left() + bounds.size.width * fraction, bounds.top())
                             }
-                            PortSide::Right => {
-                                point(bounds.right(), bounds.top() + bounds.size.height * fraction)
-                            }
+                            PortSide::Right => point(bounds.right(), row_y),
                             PortSide::Bottom => point(
                                 bounds.left() + bounds.size.width * fraction,
                                 bounds.bottom(),
                             ),
-                            PortSide::Left => {
-                                point(bounds.left(), bounds.top() + bounds.size.height * fraction)
-                            }
+                            PortSide::Left => point(bounds.left(), row_y),
                         };
                         PortGeometry {
                             id: port.id().clone(),
@@ -1587,6 +1760,8 @@ impl NodeGraph {
                                 side: port.port_side(),
                             },
                             direction: port.direction(),
+                            tint: port.port_type().map(|port_type| port_type.tint(theme)),
+                            glyph: port.port_type().and_then(PortType::icon),
                         }
                     })
                     .collect();
@@ -1609,10 +1784,15 @@ impl NodeGraph {
     #[cfg(test)]
     fn routable(&self, theme: &gpui_kit_theme::Theme) -> Vec<RoutedEdge> {
         let nodes = self.geometry(theme);
-        self.routable_geometry(&nodes)
+        self.routable_geometry(theme, &nodes)
     }
 
-    fn routable_geometry(&self, nodes: &[NodeGeometry]) -> Vec<RoutedEdge> {
+    fn routable_geometry(
+        &self,
+        theme: &gpui_kit_theme::Theme,
+        nodes: &[NodeGeometry],
+    ) -> Vec<RoutedEdge> {
+        let metrics = RouteMetrics::of(theme);
         let counts = self.edges.iter().fold(HashMap::new(), |mut m, e| {
             *m.entry(e.edge_id()).or_insert(0usize) += 1;
             m
@@ -1623,7 +1803,7 @@ impl NodeGraph {
             .filter_map(|edge| {
                 let from = nodes.iter().find(|n| &n.id == edge.from())?;
                 let to = nodes.iter().find(|n| &n.id == edge.to())?;
-                let (a, b) = match (edge.source_port(), edge.target_port()) {
+                let (a, b, port_tint) = match (edge.source_port(), edge.target_port()) {
                     (Some(a), Some(b)) => {
                         let a = from.ports.iter().find(|p| &p.id == a)?;
                         let b = to.ports.iter().find(|p| &p.id == b)?;
@@ -1632,11 +1812,22 @@ impl NodeGraph {
                         {
                             return None;
                         }
-                        (a.anchor, b.anchor)
+                        (a.anchor, b.anchor, a.tint)
                     }
-                    (None, None) => auto_anchors(from.bounds, to.bounds, edge.kind()),
+                    (None, None) => {
+                        let (a, b) = auto_anchors(from.bounds, to.bounds, edge.kind());
+                        (a, b, None)
+                    }
                     _ => return None,
                 };
+                let tint = edge
+                    .edge_color()
+                    .map(|color| {
+                        theme
+                            .variant_colors(gpui_kit_theme::Variant::Light, color)
+                            .text
+                    })
+                    .or(port_tint);
                 let route = match self.routing {
                     GraphRouting::Lanes => route_orthogonal(
                         a,
@@ -1645,12 +1836,14 @@ impl NodeGraph {
                         to.bounds,
                         edge.kind(),
                         edge.edge_lane(),
+                        metrics,
                     )?,
                     GraphRouting::Curves => route_curved(a, b),
                 };
                 Some(RoutedEdge {
                     edge: edge.clone(),
                     route,
+                    tint,
                 })
             })
             .collect()
@@ -1754,6 +1947,49 @@ impl RenderOnce for NodeGraph {
             window.window_handle().window_id(),
             cx,
         );
+        // Caller-owned identities and permissions may change between moves.
+        // Keep surviving nodes' original drag origins, not deleted peers.
+        {
+            let mut state = gesture.borrow_mut();
+            if state
+                .interaction
+                .is_some_and(|mode| mode != self.interaction)
+            {
+                state.gesture = None;
+            }
+            state.interaction = Some(self.interaction);
+            let exists = |id: &SharedString| {
+                self.nodes
+                    .iter()
+                    .any(|node| node.node.ident().semantic_id() == *id)
+            };
+            let valid = matches!(self.state, GraphState::Ready)
+                && self.on_event.is_some()
+                && match state.gesture.as_mut() {
+                    Some(Gesture::Node { id, peers, .. }) => {
+                        peers.retain(|(id, _)| exists(id));
+                        exists(id)
+                    }
+                    Some(Gesture::Resize { id, .. }) => {
+                        self.interaction.moves_nodes() && exists(id)
+                    }
+                    Some(Gesture::Connect { from, .. }) => {
+                        self.interaction.edits_topology()
+                            && self.nodes.iter().any(|node| {
+                                node.node.ident().semantic_id() == from.node
+                                    && node
+                                        .node
+                                        .graph_ports()
+                                        .iter()
+                                        .any(|port| port.id() == &from.port)
+                            })
+                    }
+                    _ => true,
+                };
+            if !valid {
+                state.gesture = None;
+            }
+        }
         // Where the canvas is looking. The caller owns where it has been asked
         // to look; what the canvas owns is that it does not arrive there in
         // one frame when the reader did not move it themselves. A frame or a
@@ -1832,6 +2068,13 @@ impl RenderOnce for NodeGraph {
             // surface scale; top light below gives it depth without a vignette.
             .surface(&theme, Surface::Sunken);
 
+        let cancelled = Rc::clone(&gesture);
+        frame = frame.child(crate::interaction::on_pointer_cancel(move |_, _| {
+            let mut state = cancelled.borrow_mut();
+            state.gesture = None;
+            state.pointer = None;
+        }));
+
         // Route hover is visual transient state and exists even on an inspect-
         // only graph. The pointer is recorded here and resolved against the
         // exact routes below, after their measured geometry is available.
@@ -1854,6 +2097,10 @@ impl RenderOnce for NodeGraph {
             .cloned()
             .filter(|_| matches!(self.state, GraphState::Ready) && !self.nodes.is_empty())
         {
+            let interaction_nodes = gesture
+                .borrow_mut()
+                .interaction_nodes
+                .update(&self.nodes, &theme);
             let down = Rc::clone(&gesture);
             frame =
                 frame.on_mouse_down_with_pointer_capture(MouseButton::Left, move |event, _, cx| {
@@ -1915,16 +2162,7 @@ impl RenderOnce for NodeGraph {
             // Each card's own box, not one shared guess: a marquee that
             // selected by a fixed rectangle would miss a tall card the reader
             // dragged across and catch a short one they went around.
-            let up_nodes = self
-                .nodes
-                .iter()
-                .map(|placed| {
-                    (
-                        placed.node.ident().semantic_id(),
-                        placed.bounds(&theme, None),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let up_nodes = Rc::clone(&interaction_nodes);
             frame = frame.on_mouse_up(MouseButton::Left, move |event, window, cx| {
                 let gesture = up.borrow_mut().gesture.take();
                 match gesture {
@@ -1991,11 +2229,7 @@ impl RenderOnce for NodeGraph {
             // press was on a card or on the canvas behind it.
             let context_report = Rc::clone(&report);
             let context_bounds = Rc::clone(&measured);
-            let context_nodes = self
-                .nodes
-                .iter()
-                .map(|placed| placed.bounds(&theme, None))
-                .collect::<Vec<_>>();
+            let context_nodes = interaction_nodes;
             frame = frame.on_mouse_down(MouseButton::Right, move |event, window, cx| {
                 let frame = context_bounds.get();
                 let at = screen_to_world(
@@ -2005,7 +2239,7 @@ impl RenderOnce for NodeGraph {
                     ),
                     viewport,
                 );
-                if context_nodes.iter().any(|bounds| bounds.contains(&at)) {
+                if context_nodes.iter().any(|(_, bounds)| bounds.contains(&at)) {
                     return;
                 }
                 context_report(
@@ -2098,7 +2332,13 @@ impl RenderOnce for NodeGraph {
                 .justify_center()
                 .child(empty);
             return frame
-                .child(graph_ground(&theme, viewport, self.grid, self.ground_light))
+                .child(graph_ground(
+                    &theme,
+                    viewport,
+                    self.grid,
+                    self.axes,
+                    self.ground_light,
+                ))
                 .child(empty)
                 .semantic_in(cx, spec.value(viewport_value("empty", asked)))
                 .into_any_element();
@@ -2120,7 +2360,37 @@ impl RenderOnce for NodeGraph {
                 (height > 0.0 && height.is_finite()).then(|| (id.clone(), height))
             })
             .collect();
-        let geometry = self.geometry_with_heights(&theme, &measured_heights);
+        // Where each side port's name row sat on the last frame, in graph
+        // units below its card's top. A row that has not been measured yet
+        // leaves its port to divide the card's edge with its siblings.
+        let port_rows: HashMap<SharedString, f32> = self
+            .nodes
+            .iter()
+            .filter(|placed| {
+                placed
+                    .node
+                    .graph_ports()
+                    .iter()
+                    .any(GraphPort::seated_in_row)
+            })
+            .flat_map(|placed| {
+                let id = placed.node.ident().semantic_id();
+                placed
+                    .node
+                    .graph_ports()
+                    .iter()
+                    .filter(|port| port.seated_in_row())
+                    .map(move |port| port_measure_id(&id, port.id()))
+                    .collect::<Vec<_>>()
+            })
+            .filter_map(|measurement_id| {
+                let bounds = measure::cell(&measurement_id, window, cx).get();
+                let height = f32::from(bounds.size.height);
+                (height > 0.0 && height.is_finite())
+                    .then(|| (measurement_id, f32::from(bounds.origin.y)))
+            })
+            .collect();
+        let geometry = self.geometry_with_heights(&theme, &measured_heights, &port_rows);
         let route_cell = keyed::slot::<RouteCache>(
             &self.ident.child("routes").semantic_id(),
             window.window_handle().window_id(),
@@ -2132,7 +2402,7 @@ impl RenderOnce for NodeGraph {
             if cache.signature == signature && !cache.routes.is_empty() {
                 cache.routes.clone()
             } else {
-                let routes = self.routable_geometry(&geometry);
+                let routes = self.routable_geometry(&theme, &geometry);
                 cache.signature = signature;
                 cache.routes = routes.clone();
                 routes
@@ -2315,16 +2585,26 @@ impl RenderOnce for NodeGraph {
         let state_change = MotionPolicy::resolve(MotionRole::StateChange, cx);
         let edge_colors: HashMap<SharedString, EdgeColors> = {
             let now = cx.background_executor().now();
-            let live: HashSet<SharedString> = self.edges.iter().map(GraphEdge::edge_id).collect();
             let mut gesture = gesture.borrow_mut();
-            gesture.edge_transitions.retain(|id, _| live.contains(id));
+            gesture.edge_ids.update(&self.edges);
+            let state = &mut *gesture;
+            state
+                .edge_transitions
+                .retain(|id, _| state.edge_ids.ids.contains(id));
             let mut animating = false;
+            let tints: HashMap<SharedString, Hsla> = routes
+                .iter()
+                .filter_map(|routed| Some((routed.edge.edge_id(), routed.tint?)))
+                .collect();
             let colors = self
                 .edges
                 .iter()
                 .map(|edge| {
                     let id = edge.edge_id();
-                    let target = edge.edge_state().colors(edge.kind(), &theme);
+                    let target = match tints.get(&id) {
+                        Some(tint) => edge.edge_state().tinted_colors(*tint, &theme),
+                        None => edge.edge_state().colors(edge.kind(), &theme),
+                    };
                     let transition = gesture
                         .edge_transitions
                         .entry(id.clone())
@@ -2364,7 +2644,9 @@ impl RenderOnce for NodeGraph {
                         let world = screen_to_world(pointer, viewport);
                         ConnectionPreview {
                             route: match self.routing {
-                                GraphRouting::Lanes => route_preview(source.anchor, world),
+                                GraphRouting::Lanes => {
+                                    route_preview(source.anchor, world, RouteMetrics::of(&theme))
+                                }
                                 GraphRouting::Curves => route_curved_preview(source.anchor, world),
                             },
                             from: from.clone(),
@@ -2384,7 +2666,10 @@ impl RenderOnce for NodeGraph {
                 _ => None,
             }
         };
-        let stroke = theme.borders.hairline;
+        // A wire is drawn at its token width in graph units, so it thins and
+        // thickens with the cards it joins; a zoomed-out board keeps a hair
+        // of it rather than losing the connection.
+        let stroke = (theme.measures.node_edge_width * viewport.zoom).max(1.0);
         let edge_theme = theme.clone();
         // How far each connection has got into arriving. A connection the
         // canvas has drawn before is simply there; one it has not is drawn
@@ -2400,10 +2685,14 @@ impl RenderOnce for NodeGraph {
             // culling: a connection panned off screen and back has already
             // been drawn, and treating it as new would animate it in every
             // time it returned.
-            let live: HashSet<SharedString> = self.edges.iter().map(GraphEdge::edge_id).collect();
-            state.arrived.retain(|id, _| live.contains(id));
+            let state = &mut *state;
+            state
+                .arrived
+                .retain(|id, _| state.edge_ids.ids.contains(id));
             let span = arrival.spec().total().as_secs_f32().max(f32::EPSILON);
-            live.into_iter()
+            self.edges
+                .iter()
+                .map(GraphEdge::edge_id)
                 .map(|id| {
                     let born = *state.arrived.entry(id.clone()).or_insert(now);
                     // A canvas opening onto a graph draws it rather than
@@ -2430,96 +2719,129 @@ impl RenderOnce for NodeGraph {
             })
             .collect();
         let painted_preview = preview.clone();
-        let ground = graph_ground(&theme, viewport, self.grid, self.ground_light);
+        let ground = graph_ground(&theme, viewport, self.grid, self.axes, self.ground_light);
 
         // Edges are their own painted layer above the regions and below the
         // cards: a connection crosses a region it does not belong to, and a
         // region drawn over its own connections would hide them.
-        let beneath = canvas(
-            |_, _, _| {},
-            move |bounds, _, window, _| {
-                let transform = RouteTransform::new(bounds.origin, viewport.offset, viewport.zoom);
-                for (routed, reveal) in painted_routes {
-                    let id = routed.edge.edge_id();
-                    let colors = edge_colors.get(&id).copied().unwrap_or_else(|| {
-                        routed
-                            .edge
-                            .edge_state()
-                            .colors(routed.edge.kind(), &edge_theme)
-                    });
-                    paint_route(
-                        window,
-                        &edge_theme,
-                        &routed.edge,
-                        &routed.route,
-                        transform,
-                        EdgePaint::new(stroke, colors)
-                            .reveal(reveal)
-                            .phase(routed.edge.is_active().then_some(edge_flow_phase).flatten())
-                            .hovered(hovered_edge.as_ref() == Some(&id)),
-                    );
-                }
-                if let Some(preview) = painted_preview {
-                    // A proposal that has found a port is drawn as the
-                    // connection it would become; one still crossing open
-                    // canvas is drawn as the provisional thing it is. The
-                    // dashes are the same vocabulary a return path uses, for
-                    // the same reason: this line is not an ordinary flow.
-                    let (color, dashes) = match preview.target {
-                        Some((_, true)) => (edge_theme.colors.success, None),
-                        Some((_, false)) => (edge_theme.colors.danger, None),
-                        None => (
-                            edge_theme.colors.accent,
-                            Some([px(PREVIEW_DASH), px(PREVIEW_GAP)]),
-                        ),
-                    };
-                    let connecting = preview.target.is_some_and(|(_, legal)| legal);
-                    paint_route_stroke(
-                        window,
-                        &preview.route,
-                        transform,
-                        stroke * if connecting { 2.0 } else { 1.5 },
-                        color.opacity(if connecting {
-                            edge_theme.effects.node_active_stroke_alpha
-                        } else {
-                            edge_theme.effects.node_preview_alpha
-                        }),
-                        dashes,
-                        preview.route.corner(&edge_theme),
-                    );
-                    // The head of the proposal, so the reader's own gesture
-                    // has a mark on the canvas rather than only a line
-                    // trailing off the pointer.
-                    let head = preview.route.sample(1.0);
-                    let head = point(
-                        bounds.origin.x + px(head.x * viewport.zoom + viewport.offset.x),
-                        bounds.origin.y + px(head.y * viewport.zoom + viewport.offset.y),
-                    );
-                    let radius = px(PREVIEW_HEAD * viewport.zoom.clamp(0.5, 1.5));
-                    for step in (1..=3).rev() {
-                        let halo = radius * (1.0 + step as f32 * 0.38);
+        let beneath =
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let transform =
+                        RouteTransform::new(bounds.origin, viewport.offset, viewport.zoom);
+                    for (routed, reveal) in painted_routes {
+                        let id = routed.edge.edge_id();
+                        let colors = edge_colors.get(&id).copied().unwrap_or_else(|| match routed
+                            .tint
+                        {
+                            Some(tint) => routed.edge.edge_state().tinted_colors(tint, &edge_theme),
+                            None => routed
+                                .edge
+                                .edge_state()
+                                .colors(routed.edge.kind(), &edge_theme),
+                        });
+                        paint_route(
+                            window,
+                            &edge_theme,
+                            &routed.edge,
+                            &routed.route,
+                            transform,
+                            EdgePaint::new(stroke, colors)
+                                .reveal(reveal)
+                                .phase(routed.edge.is_active().then_some(edge_flow_phase).flatten())
+                                .hovered(hovered_edge.as_ref() == Some(&id)),
+                        );
+                    }
+                    if let Some(preview) = painted_preview {
+                        // A proposal that has found a port is drawn as the
+                        // connection it would become; one still crossing open
+                        // canvas is drawn as the provisional thing it is. The
+                        // dashes are the same vocabulary a return path uses, for
+                        // the same reason: this line is not an ordinary flow.
+                        let (color, dashes) = match preview.target {
+                            Some((_, true)) => (edge_theme.colors.success, None),
+                            Some((_, false)) => (edge_theme.colors.danger, None),
+                            None => (
+                                edge_theme.colors.accent,
+                                Some([px(PREVIEW_DASH), px(PREVIEW_GAP)]),
+                            ),
+                        };
+                        let connecting = preview.target.is_some_and(|(_, legal)| legal);
+                        paint_route_stroke(
+                            window,
+                            &preview.route,
+                            transform,
+                            stroke * if connecting { 2.0 } else { 1.5 },
+                            color.opacity(if connecting {
+                                edge_theme.effects.node_active_stroke_alpha
+                            } else {
+                                edge_theme.effects.node_preview_alpha
+                            }),
+                            dashes,
+                            preview.route.corner(&edge_theme),
+                        );
+                        // The head of the proposal, so the reader's own gesture
+                        // has a mark on the canvas rather than only a line
+                        // trailing off the pointer.
+                        let head = preview.route.sample(1.0);
+                        let head = point(
+                            bounds.origin.x + px(head.x * viewport.zoom + viewport.offset.x),
+                            bounds.origin.y + px(head.y * viewport.zoom + viewport.offset.y),
+                        );
+                        let radius = px(PREVIEW_HEAD * viewport.zoom.clamp(0.5, 1.5));
+                        for step in (1..=3).rev() {
+                            let halo = radius * (1.0 + step as f32 * 0.38);
+                            window.paint_quad(gpui::fill(
+                                Bounds::new(
+                                    point(head.x - halo, head.y - halo),
+                                    size(halo * 2.0, halo * 2.0),
+                                ),
+                                color.opacity(
+                                    edge_theme.effects.node_active_wash_alpha / (step as f32 + 1.5),
+                                ),
+                            ));
+                        }
                         window.paint_quad(gpui::fill(
                             Bounds::new(
-                                point(head.x - halo, head.y - halo),
-                                size(halo * 2.0, halo * 2.0),
+                                point(head.x - radius, head.y - radius),
+                                size(radius * 2.0, radius * 2.0),
                             ),
-                            color.opacity(
-                                edge_theme.effects.node_active_wash_alpha / (step as f32 + 1.5),
-                            ),
+                            color.opacity(edge_theme.effects.node_active_stroke_alpha),
                         ));
                     }
-                    window.paint_quad(gpui::fill(
-                        Bounds::new(
-                            point(head.x - radius, head.y - radius),
-                            size(radius * 2.0, radius * 2.0),
-                        ),
-                        color.opacity(edge_theme.effects.node_active_stroke_alpha),
-                    ));
-                }
-            },
-        )
-        .absolute()
-        .inset_0();
+                },
+            )
+            .absolute()
+            .inset_0();
+
+        // Drawn before the labels so a run ends under the wash it points at
+        // rather than across the words.
+        let edge_leaders: Vec<AnyElement> = routes
+            .iter()
+            .filter(|routed| routed.edge.edge_label().is_some())
+            .flat_map(|routed| {
+                let ink = theme.colors.node.edge;
+                relationship_placements
+                    .get(&routed.edge.edge_id())
+                    .into_iter()
+                    .flat_map(move |placement| {
+                        relationship_leader(placement.anchor, placement.shown)
+                            .into_iter()
+                            .map(move |run| {
+                                let at = world_to_screen(run.origin, viewport);
+                                div()
+                                    .absolute()
+                                    .left(px(at.x))
+                                    .top(px(at.y))
+                                    .w(px((run.size.width * viewport.zoom).max(1.0)))
+                                    .h(px((run.size.height * viewport.zoom).max(1.0)))
+                                    .bg(ink)
+                                    .into_any_element()
+                            })
+                    })
+            })
+            .collect();
 
         let edge_labels: Vec<AnyElement> = routes
             .iter()
@@ -2744,8 +3066,13 @@ impl RenderOnce for NodeGraph {
                 )
                 .text(port.label().clone())
                 .value(port.direction().name());
-                let diameter = 12.0 * viewport.zoom;
-                let label_gap = 4.0 * viewport.zoom;
+                // `reach` is the box that takes the pointer and paints
+                // nothing; `diameter` is the socket that is drawn inside it.
+                // Names, clearance and the settle wash key off whichever of
+                // the two they are actually about.
+                let reach = theme.measures.node_port * viewport.zoom;
+                let diameter = reach * PORT_MARK_SCALE;
+                let label_gap = theme.spacing.xxs * viewport.zoom;
                 let target = preview
                     .as_ref()
                     .and_then(|preview| preview.target.as_ref())
@@ -2774,30 +3101,45 @@ impl RenderOnce for NodeGraph {
                 // off the ports without tracing a single wire. The outer wash
                 // and inner bead differ in area as well as hue, keeping them
                 // apart without drawing an outline round either one.
+                // A typed port wears its type's colour whether or not it is
+                // wired, because the colour says what may be joined to it,
+                // which is what a reader deciding where to drag needs first;
+                // a wire that lands there takes the same colour and carries
+                // it across. An untyped port keeps saying only whether it is
+                // joined.
                 let color = match target {
                     Some(true) => theme.colors.success,
                     Some(false) => theme.colors.danger,
                     None if candidate == Some(true) => theme.colors.success,
-                    None if connected => theme.colors.node.port_connected,
-                    None => theme.colors.node.port_idle,
+                    None if connected => port_geometry
+                        .tint
+                        .unwrap_or(theme.colors.node.port_connected),
+                    None => port_geometry.tint.unwrap_or(theme.colors.node.port_idle),
                 };
                 let emphatic = target.is_some() || candidate == Some(true) || connected;
-                let outer = theme.color_wash(
-                    color,
-                    if emphatic {
-                        SemanticWash::Standard
-                    } else {
-                        SemanticWash::Faint
-                    },
-                );
+                // A port is a ring: the card's own plane inside, its type's
+                // colour around, and the type's glyph seated in the middle.
+                // The wire that reaches it takes the same colour, so ring and
+                // wire read as one socket rather than a dot with a line at it.
+                // A port nothing has reached yet wears the ring at a lower
+                // tone; the colour is the same, only quieter.
+                let ring = (theme.measures.node_edge_width * viewport.zoom).max(1.0);
+                let ring_color = if emphatic {
+                    color
+                } else {
+                    color.opacity(theme.effects.node_active_stroke_alpha)
+                };
                 let inner_diameter = diameter * if emphatic { 0.48 } else { 0.34 };
                 let settle = (contraction > 0.0).then(|| {
                     let size = diameter * (1.0 + contraction * 0.9);
-                    let offset = (size - diameter) * 0.5;
+                    // Centred in the target rather than grown from the mark's
+                    // own corner, because the mark no longer fills the box it
+                    // is drawn in.
+                    let offset = (reach - size) * 0.5;
                     div()
                         .absolute()
-                        .left(px(-offset))
-                        .top(px(-offset))
+                        .left(px(offset))
+                        .top(px(offset))
                         .size(px(size))
                         .rounded_full()
                         .bg(color.opacity(theme.effects.semantic_wash_faint_alpha * contraction))
@@ -2810,6 +3152,10 @@ impl RenderOnce for NodeGraph {
                 // are by every other port on the board. So the name comes back
                 // on the node the reader has picked, while a wire is being
                 // dragged anywhere, or under the pointer.
+                // A port seated in one of the card's rows already has its
+                // name printed beside it; only a port on the top or bottom
+                // edge, with no row to sit in, needs a floating one.
+                let floating = !port.seated_in_row();
                 let named = placed.node.node_selected() || preview.is_some();
                 let port_group = SharedString::from(format!("{semantic_id}-name"));
                 // The chip is what keeps a port name off the wire that runs
@@ -2842,52 +3188,79 @@ impl RenderOnce for NodeGraph {
                     .child(port.label().clone());
                 let label = match (port.port_side(), port.direction()) {
                     (PortSide::Left, PortDirection::Input) => label
-                        .right(px(diameter + label_gap))
-                        .top(px(diameter + label_gap)),
+                        .right(px(reach + label_gap))
+                        .top(px(reach + label_gap)),
                     (PortSide::Left, PortDirection::Output) => label
-                        .right(px(diameter + label_gap))
-                        .bottom(px(diameter + label_gap)),
-                    (PortSide::Right, PortDirection::Input) => label
-                        .left(px(diameter + label_gap))
-                        .top(px(diameter + label_gap)),
-                    (PortSide::Right, PortDirection::Output) => label
-                        .left(px(diameter + label_gap))
-                        .bottom(px(diameter + label_gap)),
-                    (PortSide::Top, _) => label
-                        .left(px(diameter + label_gap))
-                        .bottom(px(diameter / 2.0)),
-                    (PortSide::Bottom, _) => {
-                        label.left(px(diameter + label_gap)).top(px(diameter / 2.0))
+                        .right(px(reach + label_gap))
+                        .bottom(px(reach + label_gap)),
+                    (PortSide::Right, PortDirection::Input) => {
+                        label.left(px(reach + label_gap)).top(px(reach + label_gap))
                     }
+                    (PortSide::Right, PortDirection::Output) => label
+                        .left(px(reach + label_gap))
+                        .bottom(px(reach + label_gap)),
+                    // A port on the top or bottom edge has its wire leaving
+                    // straight out of the card, so the name clears it by
+                    // standing beside the port and by nothing else: the whole
+                    // offset is across the route, and the chip stays centred
+                    // on the port the way a seated name is centred on its row.
+                    //
+                    // Both of the offsets this used to carry were along the
+                    // route rather than across it. Outward put the chip
+                    // exactly where the wire runs, which is the one place a
+                    // reader cannot tell a name from its own line; inward put
+                    // it over whatever the card is showing. Centred, it
+                    // straddles the card's edge and covers neither.
+                    (PortSide::Top | PortSide::Bottom, _) => label.left(px(reach + label_gap)),
                 };
-                let mut view = div()
-                    .id(semantic_id)
-                    .group(port_group)
-                    .absolute()
-                    .left(px(at.x - diameter / 2.0))
-                    .top(px(at.y - diameter / 2.0))
-                    .w(px(diameter))
-                    .h(px(diameter))
+                // The socket itself. It answers to the pointer through the
+                // group rather than to its own bounds, so reaching anywhere in
+                // the target lights the mark that target belongs to.
+                let mark = div()
+                    .size(px(diameter))
                     .flex()
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .bg(outer)
+                    .bg(theme.colors.panel)
+                    .border(px(ring))
+                    .border_color(ring_color)
                     .when(emphatic, |element| element.shadow(theme.glow(color)))
-                    .when(candidate == Some(false) && target.is_none(), |element| {
-                        element.opacity(theme.opacity.disabled)
-                    })
                     // Hover strengthens the same material hierarchy rather
                     // than drawing a third outline language around it.
-                    .hover(|style| {
+                    .group_hover(port_group.clone(), |style| {
                         style
                             .bg(theme
                                 .color_wash(theme.colors.node.port_hover, SemanticWash::Strong))
                             .shadow(theme.glow(theme.colors.node.port_hover))
                     })
+                    .map(|element| match port_geometry.glyph {
+                        Some(glyph) => element.child(
+                            icon(glyph)
+                                .size(px(diameter * PORT_GLYPH_SCALE))
+                                .text_color(color),
+                        ),
+                        None => {
+                            element.child(div().size(px(inner_diameter)).rounded_full().bg(color))
+                        }
+                    });
+                let mut view = div()
+                    .id(semantic_id)
+                    .group(port_group)
+                    .absolute()
+                    .left(px(at.x - reach / 2.0))
+                    .top(px(at.y - reach / 2.0))
+                    .w(px(reach))
+                    .h(px(reach))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(candidate == Some(false) && target.is_none(), |element| {
+                        element.opacity(theme.opacity.disabled)
+                    })
                     .children(settle)
-                    .child(div().size(px(inner_diameter)).rounded_full().bg(color))
-                    .child(label);
+                    .child(mark)
+                    .children(floating.then_some(label));
                 if editable {
                     view = view.cursor_pointer();
                 }
@@ -3046,11 +3419,12 @@ impl RenderOnce for NodeGraph {
                 } else {
                     placed.node
                 };
+                let node_width = node.node_width();
                 let mut card = div()
                     .absolute()
                     .left(px(screen.x))
                     .top(px(screen.y))
-                    .w(px(node.node_width() * viewport.zoom))
+                    .w(px(node_width * viewport.zoom))
                     .child(
                         node.display_at(viewport.zoom, height)
                             .compact(compact)
@@ -3071,7 +3445,118 @@ impl RenderOnce for NodeGraph {
                         measure::record(&measurement, logical, window);
                     });
                 }
-                let mut card = card.id(composite_id("node-drag", &[id.as_ref()]));
+                // A corner to take hold of, in Arrange and Edit. It sits on
+                // the card rather than in it so that the node stays a
+                // description of content and the canvas owns the geometry
+                // the reader is changing.
+                let resize = report
+                    .as_ref()
+                    .filter(|_| interaction.moves_nodes())
+                    .map(|report| {
+                        let grip = theme.measures.node_port * viewport.zoom;
+                        let handle_id = composite_id("node-resize", &[id.as_ref()]);
+                        let start = size(
+                            node_width,
+                            height
+                                .or_else(|| measured_heights.get(&id).copied())
+                                .unwrap_or(0.0),
+                        );
+                        let down = Rc::clone(&gesture);
+                        let resize_id = id.clone();
+                        let moving = Rc::clone(&gesture);
+                        let resize_report = Rc::clone(report);
+                        let min_height = theme.control.sm.height;
+                        let up = Rc::clone(&gesture);
+                        // The corner says it can be pulled: three dots down
+                        // the diagonal, faint until the pointer is on them.
+                        // A handle that only exists as a cursor change is
+                        // found by accident, and a card that can be resized
+                        // should say so where the resizing starts.
+                        let dot = (theme.measures.node_edge_width * viewport.zoom).max(1.0);
+                        let step = dot * 2.0;
+                        let grip_inset = theme.spacing.xs * viewport.zoom;
+                        let grip_group = SharedString::from(format!("{handle_id}-grip"));
+                        let grip_rest = theme.colors.text_muted.opacity(theme.opacity.muted);
+                        let grip_hover = theme.colors.text;
+                        let grip_marks = (0..3).map(|index| {
+                            let inset = grip_inset + step * index as f32;
+                            div()
+                                .absolute()
+                                .right(px(inset))
+                                .bottom(px(inset))
+                                .size(px(dot))
+                                .rounded_full()
+                                .bg(grip_rest)
+                                .group_hover(grip_group.clone(), move |style| style.bg(grip_hover))
+                        });
+                        div()
+                            .id(handle_id.clone())
+                            .group(grip_group.clone())
+                            .absolute()
+                            .right_0()
+                            .bottom_0()
+                            .size(px(grip))
+                            .children(grip_marks)
+                            .cursor(gpui::CursorStyle::ResizeUpLeftDownRight)
+                            .on_mouse_down_with_pointer_capture(
+                                MouseButton::Left,
+                                move |event, _, cx| {
+                                    down.borrow_mut().gesture = Some(Gesture::Resize {
+                                        at: event.position,
+                                        id: resize_id.clone(),
+                                        size: start,
+                                    });
+                                    cx.stop_propagation();
+                                },
+                            )
+                            .on_mouse_move(move |event, window, cx| {
+                                let mut state = moving.borrow_mut();
+                                if event.pressed_button != Some(MouseButton::Left) {
+                                    state.gesture = None;
+                                    return;
+                                }
+                                let Some(Gesture::Resize {
+                                    at,
+                                    id,
+                                    size: start,
+                                }) = state.gesture.as_ref()
+                                else {
+                                    return;
+                                };
+                                let proposed = size(
+                                    (start.width
+                                        + f32::from(event.position.x - at.x) / viewport.zoom)
+                                        .max(MIN_NODE_WIDTH),
+                                    (start.height
+                                        + f32::from(event.position.y - at.y) / viewport.zoom)
+                                        .max(min_height),
+                                );
+                                let id = id.clone();
+                                drop(state);
+                                resize_report(
+                                    &NodeGraphEvent::NodeResized { id, size: proposed },
+                                    window,
+                                    cx,
+                                );
+                                cx.stop_propagation();
+                            })
+                            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                                let mut state = up.borrow_mut();
+                                if matches!(state.gesture, Some(Gesture::Resize { .. })) {
+                                    state.gesture = None;
+                                }
+                                cx.stop_propagation();
+                            })
+                            .semantic_in(
+                                cx,
+                                NodeSpec::new(handle_id, Role::Button)
+                                    .parent(id.clone())
+                                    .text(cx.strings().text(StringKey::CanvasResize)),
+                            )
+                    });
+                let mut card = card
+                    .id(composite_id("node-drag", &[id.as_ref()]))
+                    .children(resize);
                 if let Some(report) = report.as_ref().cloned() {
                     let down = Rc::clone(&gesture);
                     let start = point(placed.x, placed.y);
@@ -3346,6 +3831,11 @@ impl RenderOnce for NodeGraph {
             .children(if compact && pending_frame.is_none() {
                 Vec::new()
             } else {
+                edge_leaders
+            })
+            .children(if compact && pending_frame.is_none() {
+                Vec::new()
+            } else {
                 edge_labels
             })
             .children(group)
@@ -3494,6 +3984,7 @@ fn graph_ground(
     theme: &gpui_kit_theme::Theme,
     viewport: GraphViewport,
     draw_grid: bool,
+    draw_axes: bool,
     cast_light: bool,
 ) -> AnyElement {
     let light = ground_cast(theme, cast_light);
@@ -3519,7 +4010,7 @@ fn graph_ground(
                 |_, _, _| {},
                 move |bounds, _, window, _| {
                     if draw_grid {
-                        paint_grid(window, bounds, viewport, paint);
+                        paint_grid(window, bounds, viewport, paint, draw_axes);
                     }
                 },
             )
@@ -3581,23 +4072,24 @@ fn grid_level(zoom: f32) -> (f32, f32) {
     (world, fade)
 }
 
-/// Paints the dot grid the canvas sits on, and the two rules through its
-/// origin.
+/// Paints the dot grid the canvas sits on, and, when asked, the two rules
+/// through its origin.
 ///
 /// The grid is anchored to the pan offset rather than to the viewport, so it
 /// travels with the graph and reports that the canvas moved. A grid pinned to
 /// the viewport would sit still under a graph that was moving, which reads as
 /// the graph having stayed where it was.
 ///
-/// The axes are where the origin is. Every interval of a grid looks like every
-/// other one, so a grid alone says how far the canvas has been dragged and
-/// never where the reader has arrived; the axes are the one place on the
-/// canvas that is somewhere in particular.
+/// When present, the axes are where the origin is. Every interval of a grid
+/// looks like every other one, so a grid alone says how far the canvas has
+/// been dragged and never where the reader has arrived; the axes are the one
+/// place on the canvas that is somewhere in particular.
 fn paint_grid(
     window: &mut Window,
     bounds: Bounds<Pixels>,
     viewport: GraphViewport,
     paint: GridPaint,
+    draw_axes: bool,
 ) {
     let (world_step, fade) = grid_level(viewport.zoom);
     let width = f32::from(bounds.size.width);
@@ -3643,25 +4135,27 @@ fn paint_grid(
         world_y += world_step;
     }
 
-    let origin_x = viewport.offset.x;
-    let origin_y = viewport.offset.y;
-    if (0.0..width).contains(&origin_x) {
-        window.paint_quad(gpui::fill(
-            Bounds::new(
-                point(bounds.origin.x + px(origin_x), bounds.origin.y),
-                size(px(AXIS_WIDTH), bounds.size.height),
-            ),
-            paint.axis,
-        ));
-    }
-    if (0.0..height).contains(&origin_y) {
-        window.paint_quad(gpui::fill(
-            Bounds::new(
-                point(bounds.origin.x, bounds.origin.y + px(origin_y)),
-                size(bounds.size.width, px(AXIS_WIDTH)),
-            ),
-            paint.axis,
-        ));
+    if draw_axes {
+        let origin_x = viewport.offset.x;
+        let origin_y = viewport.offset.y;
+        if (0.0..width).contains(&origin_x) {
+            window.paint_quad(gpui::fill(
+                Bounds::new(
+                    point(bounds.origin.x + px(origin_x), bounds.origin.y),
+                    size(px(AXIS_WIDTH), bounds.size.height),
+                ),
+                paint.axis,
+            ));
+        }
+        if (0.0..height).contains(&origin_y) {
+            window.paint_quad(gpui::fill(
+                Bounds::new(
+                    point(bounds.origin.x, bounds.origin.y + px(origin_y)),
+                    size(bounds.size.width, px(AXIS_WIDTH)),
+                ),
+                paint.axis,
+            ));
+        }
     }
 }
 
@@ -3733,6 +4227,21 @@ mod tests {
         assert!(
             NodeGraph::new("run").ground_light(false).grid,
             "refusing the light leaves the grid alone"
+        );
+    }
+
+    /// Every canvas built before the setting existed marked its origin. A
+    /// board may refuse that landmark without also giving up its dot ruler or
+    /// changing the material underneath it.
+    #[test]
+    fn a_canvas_marks_its_origin_until_it_says_otherwise() {
+        assert!(NodeGraph::new("run").axes);
+        let board = NodeGraph::new("run").axes(false);
+        assert!(!board.axes);
+        assert!(board.grid, "refusing the axes leaves the grid alone");
+        assert!(
+            board.ground_light,
+            "refusing the axes leaves the ground alone"
         );
     }
 
@@ -4062,6 +4571,19 @@ mod tests {
             "a small graph is shown at its own size, not blown up"
         );
 
+        let magnified = frame_all(
+            &one,
+            &[],
+            &[],
+            surface(1200.0, 900.0),
+            (1.5, 2.0),
+            Edges::default(),
+            &[],
+        )
+        .expect("a legal magnified frame");
+        assert_eq!(magnified.zoom, 1.5);
+        assert_eq!(magnified.offset, point(570.0, 420.0));
+
         let wide = geometry_at(&[(0.0, 0.0, 100_000.0, 100.0)]);
         let floored = frame_all(
             &wide,
@@ -4170,6 +4692,7 @@ mod tests {
         let id = edge.edge_id();
         let routes = [RoutedEdge {
             edge,
+            tint: None,
             route: route_curved(
                 Anchor {
                     point: point(100.0, 100.0),
@@ -4244,6 +4767,7 @@ mod tests {
             sizes.insert(edge.edge_id(), size(210.0, 20.0));
             routes.push(RoutedEdge {
                 edge,
+                tint: None,
                 route: route_curved(
                     Anchor {
                         point: point(start_x, 100.0 + drop),
@@ -4550,6 +5074,8 @@ mod tests {
                         side: PortSide::Right,
                     },
                     direction: PortDirection::Output,
+                    tint: None,
+                    glyph: None,
                 }],
             },
             NodeGeometry {
@@ -4563,6 +5089,8 @@ mod tests {
                         side: PortSide::Left,
                     },
                     direction: PortDirection::Input,
+                    tint: None,
+                    glyph: None,
                 }],
             },
         ];
@@ -4693,6 +5221,37 @@ mod tests {
         }];
         assert_ne!(first, route_signature(&shifted, &[]));
         assert_eq!(first, route_signature(&geometry, &[]));
+    }
+
+    #[test]
+    fn interaction_bounds_are_reused_until_node_geometry_changes() {
+        let theme = gpui_kit_theme::Theme::studio_dark();
+        let nodes = [Placed::new(GraphNode::new("a", "A"), 0.0, 0.0)];
+        let mut cache = InteractionNodeCache::default();
+        let first = cache.update(&nodes, &theme);
+        let unchanged = cache.update(&nodes, &theme);
+        assert!(Rc::ptr_eq(&first, &unchanged));
+
+        let moved = [Placed::new(GraphNode::new("a", "A"), 40.0, 0.0)];
+        let changed = cache.update(&moved, &theme);
+        assert!(!Rc::ptr_eq(&first, &changed));
+        assert_ne!(first[0].1, changed[0].1);
+    }
+
+    #[test]
+    fn edge_identity_cache_tracks_identity_changes() {
+        let mut cache = EdgeIdentityCache::default();
+        let first = [GraphEdge::new("a", "b")];
+        cache.update(&first);
+        assert_eq!(cache.ids, HashSet::from([first[0].edge_id()]));
+        let signature = cache.signature;
+        cache.update(&first);
+        assert_eq!(cache.signature, signature);
+
+        let changed = [GraphEdge::new("a", "b").lane(1)];
+        cache.update(&changed);
+        assert_eq!(cache.ids, HashSet::from([changed[0].edge_id()]));
+        assert_ne!(cache.signature, signature);
     }
 
     #[test]

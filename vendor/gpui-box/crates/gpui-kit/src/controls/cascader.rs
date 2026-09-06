@@ -17,8 +17,9 @@ use crate::foundation::{
     ActiveDirection, DirectionalExt, Disableable, Ident, LayoutDirection, Pressable, Sizable,
     StyledExt, text as foundation_text,
 };
+use crate::layout::scroll::scroll_handle;
 use crate::overlay::{
-    Hang, Placement,
+    Hang, Placement, Tooltipped,
     popover::{self, MenuKey},
 };
 use crate::state::Loadable;
@@ -498,7 +499,7 @@ impl Cascader {
                         .into_any_element()
                 })
             }
-            Loadable::Ready(children) => self.option_column(children, &ident, cx),
+            Loadable::Ready(children) => self.option_column(children, &ident, window, cx),
             Loadable::Loading => self.slots.or_else(slot::LOADING, window, cx, |_, cx| {
                 div()
                     .p(px(theme.space(Space::Xl)))
@@ -509,8 +510,25 @@ impl Cascader {
                     .into_any_element()
             }),
             Loadable::Idle => self.slots.or_else(slot::EMPTY, window, cx, |_, cx| {
-                EmptyState::new(ident, cx.strings().text(StringKey::CascaderUnstarted))
-                    .kind(EmptyKind::Unstarted)
+                let wording = cx.strings().text(StringKey::CascaderUnstarted);
+                div()
+                    .id(ident.element_id())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .p_token(&theme, Space::Xl)
+                    .child(
+                        icon(Icon::Document)
+                            .size(px(theme.measures.standalone_icon))
+                            .text_color(theme.colors.text_faint),
+                    )
+                    .tip(ident.clone(), wording.clone())
+                    .semantic_in(
+                        cx,
+                        NodeSpec::new(ident.semantic_id(), Role::Status)
+                            .text(wording)
+                            .value(EmptyKind::Unstarted.name()),
+                    )
                     .into_any_element()
             }),
             Loadable::Empty => self.slots.or_else(slot::EMPTY, window, cx, |_, cx| {
@@ -577,29 +595,36 @@ impl Cascader {
         &self,
         options: &[CascaderOption],
         ident: &Ident,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme().clone();
-        div()
-            .id(ident.element_id())
-            .min_w(px(theme.measures.compact_menu_min_width))
-            .max_h(px(theme.measures.menu_max_height))
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .children(options.iter().map(|option| self.row(option, ident, cx)))
-            .semantic_in(
-                cx,
-                NodeSpec::new(ident.semantic_id(), Role::Menu)
-                    .parent(self.ident.child("menu").semantic_id()),
-            )
-            .into_any_element()
+        let scroll = scroll_handle(ident, window, cx);
+        popover::menu_body(
+            &ident.child("fade"),
+            &scroll,
+            div()
+                .id(ident.element_id())
+                .min_w(px(theme.measures.compact_menu_min_width))
+                .max_h(px(theme.measures.menu_max_height))
+                .overflow_y_scroll()
+                .track_scroll(&scroll)
+                .flex()
+                .flex_col()
+                .children(options.iter().map(|option| self.row(option, ident, cx)))
+                .semantic_in(
+                    cx,
+                    NodeSpec::new(ident.semantic_id(), Role::Menu)
+                        .parent(self.ident.child("menu").semantic_id()),
+                ),
+        )
+        .into_any_element()
     }
 
     fn menu(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let root = self.ident.child("menu.root");
-        let mut columns = vec![self.option_column(&self.options, &root, cx)];
+        let mut columns = vec![self.option_column(&self.options, &root, window, cx)];
         let mut options = self.options.as_slice();
         for id in &self.open_path {
             let Some(parent) = options.iter().find(|option| &option.id == id) else {
