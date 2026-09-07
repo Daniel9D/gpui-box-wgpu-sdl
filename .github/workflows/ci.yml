@@ -30,7 +30,9 @@ jobs:
       - run: cargo check --no-default-features
       - run: cargo check --features host
       - run: cargo check --features kit
-      - run: cargo check -p gpui-box-sdl
+      - run: cargo check -p gpui-box-sdl --tests --no-default-features
+      - run: cargo check -p gpui-box-sdl --tests --no-default-features --features wgpu-runtime
+      - run: cargo check -p gpui-box-sdl --examples
 
   wasm:
     runs-on: ubuntu-latest

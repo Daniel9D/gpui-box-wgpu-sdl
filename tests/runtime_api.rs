@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use gpui_wgpu::{
-    CloseOutcome, ExternalGpu, TextPreedit, WgpuRuntime, WgpuRuntimeBuilder, WgpuWindow,
-    WgpuWindowState,
+    CloseOutcome, ExternalGpu, TextPreedit, WgpuExecutionMode, WgpuRuntime, WgpuRuntimeBuilder,
+    WgpuWindow, WgpuWindowState,
 };
 
 type RuntimeConstructor = fn(
@@ -61,4 +61,26 @@ fn render_window_accepts_a_borrowed_texture_view() {
     }
 
     let _ = accepts_contract;
+}
+
+#[test]
+fn runtime_builder_exposes_embedding_defaults() {
+    fn configure(
+        builder: WgpuRuntimeBuilder,
+        text_system: Arc<dyn gpui::PlatformTextSystem>,
+        assets: Arc<dyn gpui::AssetSource>,
+    ) -> WgpuRuntimeBuilder {
+        builder
+            .execution_mode(WgpuExecutionMode::Deterministic)
+            .default_scale_factor(2.0)
+            .default_appearance(gpui::WindowAppearance::Dark)
+            .text_system(text_system)
+            .assets(assets)
+    }
+
+    let _ = configure;
+    let _modes = [
+        WgpuExecutionMode::Realtime,
+        WgpuExecutionMode::Deterministic,
+    ];
 }

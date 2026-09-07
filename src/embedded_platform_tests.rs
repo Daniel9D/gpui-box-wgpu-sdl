@@ -63,6 +63,26 @@ fn frame_requests_are_routed_only_to_the_selected_window() {
     assert!(second_called.get());
 }
 
+#[test]
+fn embedded_window_inherits_scale_and_appearance_defaults() {
+    let platform = EmbeddedPlatform::new_with_defaults(
+        Arc::new(ThreadedDispatcher::new()),
+        Arc::new(NoopTextSystem),
+        Arc::new(EmptyAtlas),
+        Rc::new(EmptyDisplay),
+        2.0,
+        gpui::WindowAppearance::Dark,
+    );
+    let app = Application::new_inaccessible(platform.clone()).run_embedded(|_: &mut App| {});
+    let window = open_window(&app, size(px(100.0), px(80.0)));
+
+    assert_eq!(platform.window(window).unwrap().scale_factor(), 2.0);
+    assert_eq!(
+        platform.window(window).unwrap().appearance(),
+        gpui::WindowAppearance::Dark
+    );
+}
+
 struct EmptyAtlas;
 
 impl PlatformAtlas for EmptyAtlas {

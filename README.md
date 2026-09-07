@@ -30,15 +30,14 @@ The package supports path and Git dependencies; crates.io publication is disable
 | Feature         | Behavior                                                                    |
 | --------------- | --------------------------------------------------------------------------- |
 | default (empty) | Renderer, text system, native external-device rendering                     |
-| `host`          | Native `WgpuHost`, GPUI headless context, image capture APIs                |
-| `test-support`  | Compatibility alias enabling `host`                                         |
+| `host`          | Native `WgpuRuntime` and the single-window `WgpuHost` compatibility facade   |
+| `test-support`  | Deterministic image capture and renderer cache diagnostics for tests          |
 | `kit`           | `host` plus `gpui-box-kit` components with optional heavy features disabled |
 | `font-kit`      | System font discovery                                                       |
 
-`host` enables `gpui/test-support` and the direct optional `image` dependency
-because the pinned GPUI headless APIs require them. Default production builds
-do not activate those features; upstream GPUI may use image libraries
-transitively. Development tests enable GPUI test support separately.
+`host` uses the production `EmbeddedPlatform`; it does not enable GPUI's test
+platform, `FakeHttpClient`, or `gpui/test-support`. Those dependencies remain
+behind the explicit `test-support` feature and dev dependencies.
 
 ## Render an existing GPUI scene
 
@@ -67,7 +66,61 @@ fn render(
 ```
 
 Text and sprites require scene resources from the renderer's atlas. Use
-`WgpuHost` to let GPUI build the scene and share the atlas automatically.
+`WgpuRuntime` to let one GPUI application build scenes for any number of SDL
+windows while sharing the device, queue, atlas, clipboard, and application state.
+
+## Multi-window runtime
+
+`WgpuRuntime` is the production API. Create it once from the engine's
+`ExternalGpu`, then map every native SDL `WindowID` to a `WgpuWindow`. A window
+is a generational handle scoped to its runtime; closed and foreign handles
+return errors instead of aliasing a new window.
+
+```no_run
+# #[cfg(all(not(target_family = "wasm"), feature = "host"))]
+# fn example(gpu: gpui_wgpu::ExternalGpu) -> anyhow::Result<()> {
+use gpui::{AppContext, Context, IntoElement, ParentElement, Render, Window, div, px, size};
+use gpui_wgpu::{CosmicTextSystem, WgpuExecutionMode, WgpuRuntime, wgpu};
+use std::sync::Arc;
+
+let mut runtime = WgpuRuntime::builder(
+    gpu,
+    wgpu::TextureFormat::Rgba8Unorm,
+    Arc::new(CosmicTextSystem::new_without_system_fonts("sans-serif")),
+    Arc::new(()),
+)
+.execution_mode(WgpuExecutionMode::Realtime)
+.default_scale_factor(1.0)
+.default_appearance(gpui::WindowAppearance::Dark)
+.build()?;
+
+struct Root(&'static str);
+impl Render for Root {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child(self.0)
+    }
+}
+
+let (first, panel) = runtime.open_window(size(px(800.0), px(600.0)), |_, cx| {
+    cx.new(|_| Root("shared GPUI application"))
+})?;
+let (second, _) = runtime.open_window(size(px(480.0), px(320.0)), |_, cx| {
+    cx.new(|_| Root("second native window"))
+})?;
+let _ = (first, second, panel);
+# Ok(()) }
+```
+
+Call `dispatch`, `dispatch_text`, `dispatch_text_editing`, focus/resize methods,
+and `pump` from the SDL event loop. `take_redraw_requests` reports dirty windows;
+render each one directly into its current caller-owned `TextureView` with
+`render_window`, then present it through SDL/your engine.
+
+To detach a panel, call `detach_window` and open the returned `Entity` with
+`open_window_with_entity`. Moving it back uses the same pair of operations. Its
+`EntityId`, state, subscriptions, and shared app context survive both moves.
+Closing is veto-aware through `request_close_window`; forceful engine teardown
+uses `close_window`.
 
 ## Host a GPUI view
 
@@ -117,10 +170,10 @@ fn embed(
 ```
 
 Retain the host between frames and render after state changes. It does not own
-an OS event loop or schedule presentation. GPUI's headless context uses its test
-platform and deterministic executor, not a full native platform. Committed text
-goes through the focused keystroke/input-handler path. Native clipboard, cursor,
-IME composition, accessibility, and other platform services need an app adapter.
+an OS event loop or schedule presentation. `WgpuHost` is a compatibility facade
+over one deterministic `WgpuRuntime` window. New SDL integrations should use
+`WgpuRuntime` so focus, UTF-8 clipboard, cursor, committed text, IME preedit,
+multiple windows, and detachable entities all use the production platform path.
 
 ## Render an engine-owned texture with `img`
 
@@ -184,9 +237,9 @@ gpui_position = (native_position - viewport_origin) / viewport_scale
 | wheel            | `ScrollWheelEvent`                | pointer position, pixel/line delta, phase       |
 | key down/up      | `KeyDownEvent` / `KeyUpEvent`     | normalized key, character, repeat, modifiers    |
 | modifiers        | `ModifiersChangedEvent`           | Ctrl, Alt, Shift, platform, function, Caps Lock |
-| committed text   | `WgpuHost::dispatch_text`         | UTF-8 text from `SDL_EVENT_TEXT_INPUT`          |
+| committed text   | `WgpuRuntime::dispatch_text`      | UTF-8 text from `SDL_EVENT_TEXT_INPUT`          |
 | composition      | `SdlHostEvent::TextEditing`       | marked range and `SDL_EVENT_TEXT_EDITING` data  |
-| resize/HiDPI     | `render_to_view`                  | physical extent and positive scale factor       |
+| resize/HiDPI     | `resize_window` / `render_window` | physical extent and positive scale factor       |
 | focus            | `SdlHostEvent::FocusChanged`      | loss also clears retained input state           |
 | file drop        | `FileDropEvent`                   | UTF-8 paths accumulated through one drop session |
 | UTF-8 clipboard  | `SdlPlatformBridge`               | explicit pull before paste and push after copy  |
@@ -226,8 +279,8 @@ gpui_wgpu = { package = "gpui-box-wgpu", path = "../gpui-box-wgpu", features = [
 The `kit` feature enables `host`; default renderer builds do not compile the
 kit. Import the matching vendored kit through `gpui_wgpu::gpui_kit`.
 
-In the `WgpuHost::new` root builder, install the kit before constructing the
-root view:
+In a runtime window's root builder, install the kit before constructing the
+first root view:
 
 ```ignore
 // Pass Arc::new(gpui_kit::assets::Assets) as the host asset source.
@@ -244,11 +297,11 @@ window and presentation.
 
 Each engine frame:
 
-1. Route SDL events through the SDL adapter and `host.dispatch`/`dispatch_text`.
-2. Call `host.tick(elapsed)` even when there are no input events. Elapsed time
-   is the delta since the last tick, not time since startup. This pumps tasks
-   and advances the deterministic host clock for timers and animations.
-3. Render into an engine-owned UI texture with `host.render_to_view`.
+1. Route SDL events by `SDL_WindowID` through `SdlWindowRouter` and the runtime
+   dispatch methods.
+2. Call `runtime.pump()` from the normal realtime loop, including idle frames
+   needed by timers, async work, and completed luminance probes.
+3. Render dirty windows into engine-owned UI textures with `render_window`.
 4. Composite that texture over the engine scene on the GPU, then present.
 
 The UI target must use the same device and constructor format, with
@@ -257,14 +310,12 @@ use a separate target to preserve your scene. Configure transparent UI/root
 backgrounds where the scene should remain visible. Match the composition blend
 state to the rendered texture's alpha representation; no CPU readback is needed.
 
-`host.update(|window, cx| ...)` allows changes to entities, focus, globals and
-clipboard. Clipboard in this headless host is in-process; `SdlPlatformBridge`
-synchronizes UTF-8 text explicitly with the OS and also applies GPUI cursor
-requests to SDL. Full IME session control, accessibility transport, native
-menus, additional OS windows and real-I/O scheduling are not provided by this
-checkpoint. The headless context installs a fake HTTP client that returns 404;
-components needing network resources require an engine-provided service.
-`tick` retains the test dispatcher, not a native production event loop.
+`runtime.update_window(...)` updates entities and globals. `SdlPlatformBridge`
+synchronizes UTF-8 text explicitly with the OS and applies each GPUI window's
+cursor request to SDL. Full SDL candidate-window/session control,
+accessibility transport, native menus, and non-text clipboard formats remain
+outside this checkpoint. The production application uses GPUI's null HTTP
+client unless the embedding API is extended with an application service.
 
 The focused integration check is:
 

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{WgpuRuntime, WgpuWindow};
+use crate::{WgpuExecutionMode, WgpuRuntime, WgpuWindow};
 
 pub struct ExternalGpu {
     pub instance: wgpu::Instance,
@@ -24,7 +24,9 @@ impl WgpuHost {
         asset_source: Arc<dyn gpui::AssetSource>,
         build_root: impl FnOnce(&mut gpui::Window, &mut gpui::App) -> gpui::Entity<V>,
     ) -> anyhow::Result<Self> {
-        let mut runtime = WgpuRuntime::new(gpu, target_format, text_system, asset_source)?;
+        let mut runtime = WgpuRuntime::builder(gpu, target_format, text_system, asset_source)
+            .execution_mode(WgpuExecutionMode::Deterministic)
+            .build()?;
         let (window, _) = runtime.open_window(initial_size, build_root)?;
         Ok(Self { runtime, window })
     }

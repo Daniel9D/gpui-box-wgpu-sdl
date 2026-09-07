@@ -67,6 +67,7 @@ pub struct WgpuRuntime {
     app: gpui::ApplicationHandle,
     windows: SlotMap<RuntimeWindowKey, RuntimeWindow>,
     attached_entities: std::collections::HashSet<gpui::EntityId>,
+    execution_mode: WgpuExecutionMode,
 }
 
 struct RuntimeWindow {
@@ -92,6 +93,16 @@ pub struct WgpuRuntimeBuilder {
     target_format: wgpu::TextureFormat,
     text_system: Arc<dyn gpui::PlatformTextSystem>,
     asset_source: Arc<dyn gpui::AssetSource>,
+    execution_mode: WgpuExecutionMode,
+    default_scale_factor: f32,
+    default_appearance: gpui::WindowAppearance,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WgpuExecutionMode {
+    #[default]
+    Realtime,
+    Deterministic,
 }
 
 impl WgpuRuntime {
@@ -101,30 +112,46 @@ impl WgpuRuntime {
         text_system: Arc<dyn gpui::PlatformTextSystem>,
         asset_source: Arc<dyn gpui::AssetSource>,
     ) -> anyhow::Result<Self> {
+        Self::builder(gpu, target_format, text_system, asset_source).build()
+    }
+
+    fn new_configured(builder: WgpuRuntimeBuilder) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            builder.default_scale_factor.is_finite() && builder.default_scale_factor > 0.0,
+            "default scale factor must be positive and finite"
+        );
         static NEXT_RUNTIME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let dispatcher = Arc::new(gpui::ThreadedDispatcher::new());
-        let context = WgpuContext::from_external(gpu.instance, gpu.adapter, gpu.device, gpu.queue)?;
+        let context = WgpuContext::from_external(
+            builder.gpu.instance,
+            builder.gpu.adapter,
+            builder.gpu.device,
+            builder.gpu.queue,
+        )?;
         let atlas = Arc::new(WgpuAtlas::from_context(&context));
-        let platform = EmbeddedPlatform::new(
+        let platform = EmbeddedPlatform::new_with_defaults(
             dispatcher.clone(),
-            text_system,
+            builder.text_system,
             atlas.clone(),
             Rc::new(EmbeddedDisplay),
+            builder.default_scale_factor,
+            builder.default_appearance,
         );
         let app = gpui::Application::new_inaccessible(platform.clone())
-            .with_assets(SharedAssets(asset_source))
+            .with_assets(SharedAssets(builder.asset_source))
             .with_quit_mode(gpui::QuitMode::Explicit)
             .run_embedded(|_| {});
         Ok(Self {
             runtime_id: NEXT_RUNTIME_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             context,
             atlas,
-            target_format,
+            target_format: builder.target_format,
             dispatcher,
             platform,
             app,
             windows: SlotMap::with_key(),
             attached_entities: std::collections::HashSet::new(),
+            execution_mode: builder.execution_mode,
         })
     }
 
@@ -139,6 +166,9 @@ impl WgpuRuntime {
             target_format,
             text_system,
             asset_source,
+            execution_mode: WgpuExecutionMode::Realtime,
+            default_scale_factor: 1.0,
+            default_appearance: gpui::WindowAppearance::Light,
         }
     }
 
@@ -176,6 +206,7 @@ impl WgpuRuntime {
                 &self.context,
                 self.atlas.clone(),
                 self.target_format,
+                self.execution_mode == WgpuExecutionMode::Deterministic,
             )?,
             target: None,
             error: None,
@@ -469,7 +500,12 @@ impl WgpuRuntime {
     }
 
     pub fn pump(&mut self) {
-        self.dispatcher.run_ready_main_tasks();
+        match self.execution_mode {
+            WgpuExecutionMode::Realtime => {
+                self.dispatcher.run_ready_main_tasks();
+            }
+            WgpuExecutionMode::Deterministic => self.dispatcher.run_until_idle(),
+        }
     }
 
     pub(crate) fn pump_until_idle(&mut self) {
@@ -505,13 +541,33 @@ impl Drop for WgpuRuntime {
 }
 
 impl WgpuRuntimeBuilder {
+    pub fn execution_mode(mut self, execution_mode: WgpuExecutionMode) -> Self {
+        self.execution_mode = execution_mode;
+        self
+    }
+
+    pub fn default_scale_factor(mut self, scale_factor: f32) -> Self {
+        self.default_scale_factor = scale_factor;
+        self
+    }
+
+    pub fn default_appearance(mut self, appearance: gpui::WindowAppearance) -> Self {
+        self.default_appearance = appearance;
+        self
+    }
+
+    pub fn text_system(mut self, text_system: Arc<dyn gpui::PlatformTextSystem>) -> Self {
+        self.text_system = text_system;
+        self
+    }
+
+    pub fn assets(mut self, asset_source: Arc<dyn gpui::AssetSource>) -> Self {
+        self.asset_source = asset_source;
+        self
+    }
+
     pub fn build(self) -> anyhow::Result<WgpuRuntime> {
-        WgpuRuntime::new(
-            self.gpu,
-            self.target_format,
-            self.text_system,
-            self.asset_source,
-        )
+        WgpuRuntime::new_configured(self)
     }
 }
 

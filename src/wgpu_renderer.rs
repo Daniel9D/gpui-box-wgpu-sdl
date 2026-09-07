@@ -3287,24 +3287,26 @@ impl WgpuRenderer {
         }
         let texture_info = self.atlas.get_texture_info(texture_id);
         let key = (texture_info.generation, texture_id);
-        let texture = self
+        let cached = self
             .resources()
             .atlas_bind_groups
             .borrow()
             .get(&key)
-            .cloned()
-            .unwrap_or_else(|| {
-                let bind_group =
-                    self.create_texture_bind_group("sprite_texture_bind_group", &texture_info.view);
-                let mut cache = self.resources().atlas_bind_groups.borrow_mut();
-                cache.retain(|(generation, _), _| *generation == texture_info.generation);
-                cache.insert(key, bind_group.clone());
-                #[cfg(feature = "test-support")]
-                self.resources()
-                    .atlas_bind_group_creations
-                    .set(self.resources().atlas_bind_group_creations.get() + 1);
-                bind_group
-            });
+            .cloned();
+        let texture = if let Some(cached) = cached {
+            cached
+        } else {
+            let bind_group =
+                self.create_texture_bind_group("sprite_texture_bind_group", &texture_info.view);
+            let mut cache = self.resources().atlas_bind_groups.borrow_mut();
+            cache.retain(|(generation, _), _| *generation == texture_info.generation);
+            cache.insert(key, bind_group.clone());
+            #[cfg(feature = "test-support")]
+            self.resources()
+                .atlas_bind_group_creations
+                .set(self.resources().atlas_bind_group_creations.get() + 1);
+            bind_group
+        };
         self.draw_bound_texture_sprites(sprite_instances, &texture, pipeline, range, pass);
     }
 
@@ -3895,8 +3897,10 @@ impl WgpuHeadlessRenderer {
         context: &WgpuContext,
         atlas: Arc<WgpuAtlas>,
         target_format: wgpu::TextureFormat,
+        wait_for_probes: bool,
     ) -> anyhow::Result<Self> {
-        let renderer = WgpuRenderer::new_headless_with_format(context, atlas, target_format)?;
+        let mut renderer = WgpuRenderer::new_headless_with_format(context, atlas, target_format)?;
+        renderer.wait_for_probes = wait_for_probes;
         Ok(Self { renderer })
     }
 

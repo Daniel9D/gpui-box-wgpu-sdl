@@ -53,6 +53,8 @@ pub(crate) struct EmbeddedPlatform {
     cursor_visible: Cell<bool>,
     clipboard: RefCell<Option<ClipboardItem>>,
     system_wake: RefCell<Option<Box<dyn FnMut()>>>,
+    default_scale_factor: f32,
+    appearance: Cell<WindowAppearance>,
     weak: Weak<Self>,
 }
 
@@ -79,6 +81,7 @@ struct EmbeddedWindowState {
     close: Option<Box<dyn FnOnce()>>,
     hit_test: Option<HitTestCallback>,
     appearance_changed: Option<Box<dyn FnMut()>>,
+    appearance: WindowAppearance,
     render: Option<RenderCallback>,
     ime_area: Option<Bounds<Pixels>>,
 }
@@ -87,11 +90,30 @@ struct EmbeddedWindowState {
 pub(crate) struct EmbeddedWindow(Rc<RefCell<EmbeddedWindowState>>);
 
 impl EmbeddedPlatform {
+    #[cfg(test)]
     pub(crate) fn new(
         dispatcher: Arc<ThreadedDispatcher>,
         text_system: Arc<dyn PlatformTextSystem>,
         atlas: Arc<dyn PlatformAtlas>,
         display: Rc<dyn PlatformDisplay>,
+    ) -> Rc<Self> {
+        Self::new_with_defaults(
+            dispatcher,
+            text_system,
+            atlas,
+            display,
+            1.0,
+            WindowAppearance::Light,
+        )
+    }
+
+    pub(crate) fn new_with_defaults(
+        dispatcher: Arc<ThreadedDispatcher>,
+        text_system: Arc<dyn PlatformTextSystem>,
+        atlas: Arc<dyn PlatformAtlas>,
+        display: Rc<dyn PlatformDisplay>,
+        default_scale_factor: f32,
+        appearance: WindowAppearance,
     ) -> Rc<Self> {
         Rc::new_cyclic(|weak| Self {
             background: BackgroundExecutor::new(dispatcher.clone()),
@@ -105,6 +127,8 @@ impl EmbeddedPlatform {
             cursor_visible: Cell::new(true),
             clipboard: RefCell::new(None),
             system_wake: RefCell::new(None),
+            default_scale_factor,
+            appearance: Cell::new(appearance),
             weak: weak.clone(),
         })
     }
@@ -423,7 +447,7 @@ impl Platform for EmbeddedPlatform {
         let window = EmbeddedWindow(Rc::new(RefCell::new(EmbeddedWindowState {
             handle,
             bounds: params.bounds,
-            scale_factor: 1.0,
+            scale_factor: self.default_scale_factor,
             active: false,
             hovered: false,
             fullscreen: false,
@@ -443,6 +467,7 @@ impl Platform for EmbeddedPlatform {
             close: None,
             hit_test: None,
             appearance_changed: None,
+            appearance: self.appearance.get(),
             render: None,
             ime_area: None,
         })));
@@ -452,7 +477,25 @@ impl Platform for EmbeddedPlatform {
         Ok(Box::new(window))
     }
     fn window_appearance(&self) -> WindowAppearance {
-        WindowAppearance::Light
+        self.appearance.get()
+    }
+    fn set_window_appearance(&self, appearance: Option<WindowAppearance>) {
+        let appearance = appearance.unwrap_or_default();
+        self.appearance.set(appearance);
+        let windows: Vec<_> = self.windows.borrow().values().cloned().collect();
+        for window in windows {
+            let callback = {
+                let mut state = window.0.borrow_mut();
+                state.appearance = appearance;
+                state.appearance_changed.take()
+            };
+            if let Some(mut callback) = callback {
+                callback();
+                if let Ok(mut state) = window.0.try_borrow_mut() {
+                    state.appearance_changed = Some(callback);
+                }
+            }
+        }
     }
     fn open_url(&self, _: &str) {}
     fn on_open_urls(&self, _: Box<dyn FnMut(Vec<String>)>) {}
@@ -554,7 +597,7 @@ impl PlatformWindow for EmbeddedWindow {
         self.0.borrow().scale_factor
     }
     fn appearance(&self) -> WindowAppearance {
-        WindowAppearance::Light
+        self.0.borrow().appearance
     }
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>> {
         self.0
