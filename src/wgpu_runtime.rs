@@ -88,6 +88,16 @@ struct WindowRenderState {
     error: Option<anyhow::Error>,
 }
 
+struct WindowRenderTargetGuard(Rc<RefCell<WindowRenderState>>);
+
+impl Drop for WindowRenderTargetGuard {
+    fn drop(&mut self) {
+        if let Ok(mut render) = self.0.try_borrow_mut() {
+            render.target = None;
+        }
+    }
+}
+
 pub struct WgpuRuntimeBuilder {
     gpu: ExternalGpu,
     target_format: wgpu::TextureFormat,
@@ -305,14 +315,20 @@ impl WgpuRuntime {
             ),
             scale_factor,
         )?;
+        let render_state = self.windows[key].render.clone();
         {
-            let mut render = self.windows[key].render.borrow_mut();
+            let mut render = render_state.borrow_mut();
+            anyhow::ensure!(
+                render.target.is_none(),
+                "window render is already in progress"
+            );
             render.error = None;
             render.target = Some(WindowRenderTarget {
                 view: target.clone(),
                 size: gpui::size(gpui::DevicePixels(width), gpui::DevicePixels(height)),
             });
         }
+        let target_guard = WindowRenderTargetGuard(render_state.clone());
         self.platform.request_frame(
             handle,
             gpui::RequestFrameOptions {
@@ -321,8 +337,8 @@ impl WgpuRuntime {
             },
         )?;
         self.pump();
-        let mut render = self.windows[key].render.borrow_mut();
-        render.target = None;
+        drop(target_guard);
+        let mut render = render_state.borrow_mut();
         if let Some(error) = render.error.take() {
             return Err(error);
         }

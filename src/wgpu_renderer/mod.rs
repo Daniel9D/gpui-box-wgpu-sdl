@@ -1,17 +1,28 @@
+mod cache;
+mod passes;
+mod probes;
+mod shared;
+mod window;
+
+#[cfg(feature = "test-support")]
+pub use cache::WgpuRenderCacheStats;
+use passes::*;
+use probes::*;
+use shared::*;
+use window::*;
+
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext, wgpu_image::WgpuImagePayload};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
-    AtlasTextureId, BackdropGlass, Background, Bounds, DevicePixels, DrawOrder, ExternalImageId,
-    GpuSpecs, LUMINANCE_PROBE_SAMPLES, MAX_GLASS_LOBES, MAX_LUMINANCE_PROBES, NO_LUMINANCE_PROBE,
-    Path, Point, PrimitiveBatch, ScaledPixels, Scene, Size, SpriteBlendMode,
-    get_gamma_correction_ratios, probe_sample_luminance,
+    AtlasTextureId, BackdropGlass, Background, Bounds, DevicePixels, ExternalImageId, GpuSpecs,
+    LUMINANCE_PROBE_SAMPLES, MAX_GLASS_LOBES, MAX_LUMINANCE_PROBES, NO_LUMINANCE_PROBE, Path,
+    Point, PrimitiveBatch, ScaledPixels, Scene, Size, SpriteBlendMode, get_gamma_correction_ratios,
+    probe_sample_luminance,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-#[cfg(feature = "test-support")]
-use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
@@ -70,31 +81,31 @@ fn observe_shader_compilation(shader: &wgpu::ShaderModule, label: &'static str) 
 /// Shader variant for backends with storage buffer support: the shared shader
 /// logic plus the storage-buffer instance transport.
 const STORAGE_BUFFER_SHADERS: &str = concat!(
-    include_str!("shaders.wgsl"),
-    include_str!("shaders_storage.wgsl"),
+    include_str!("../shaders.wgsl"),
+    include_str!("../shaders_storage.wgsl"),
 );
 
 /// Shader variant for WebGL2, which has no storage buffers: the shared shader
 /// logic plus the texture-based instance transport.
 const WEBGL_SHADERS: &str = concat!(
-    include_str!("shaders.wgsl"),
-    include_str!("shaders_webgl.wgsl"),
+    include_str!("../shaders.wgsl"),
+    include_str!("../shaders_webgl.wgsl"),
 );
 
 /// The glass surface passes: the separable gaussian, the composite that paints
 /// the surface back through its shape and material, and the final copy to the
 /// swapchain. Named rather than included at the pipeline so that the tests can
 /// validate it without a device.
-const BACKDROP_GLASS_SHADERS: &str = include_str!("backdrop_glass.wgsl");
+const BACKDROP_GLASS_SHADERS: &str = include_str!("../backdrop_glass.wgsl");
 
 /// Subpixel text rendering requires dual-source blending, which WebGL2 lacks, so
 /// this variant only ever runs with the storage-buffer transport. The `enable`
 /// directive must precede all declarations.
 const SUBPIXEL_SHADERS: &str = concat!(
     "enable dual_source_blending;\n",
-    include_str!("shaders.wgsl"),
-    include_str!("shaders_storage.wgsl"),
-    include_str!("shaders_subpixel.wgsl"),
+    include_str!("../shaders.wgsl"),
+    include_str!("../shaders_storage.wgsl"),
+    include_str!("../shaders_subpixel.wgsl"),
 );
 
 fn least_common_multiple(left: u64, right: u64) -> u64 {
@@ -197,25 +208,6 @@ fn surface_formats_for_color_space(
         .collect()
 }
 
-struct WgpuPipelines {
-    quads: wgpu::RenderPipeline,
-    shadows: wgpu::RenderPipeline,
-    path_rasterization: wgpu::RenderPipeline,
-    paths: wgpu::RenderPipeline,
-    underlines: wgpu::RenderPipeline,
-    mono_sprites: wgpu::RenderPipeline,
-    subpixel_sprites: Option<wgpu::RenderPipeline>,
-    poly_sprites_normal: wgpu::RenderPipeline,
-    poly_sprites_additive: wgpu::RenderPipeline,
-    poly_sprites_screen: wgpu::RenderPipeline,
-    #[allow(dead_code)]
-    surfaces: wgpu::RenderPipeline,
-    backdrop_blur_weights: wgpu::RenderPipeline,
-    backdrop_blur: wgpu::RenderPipeline,
-    backdrop_composite: wgpu::RenderPipeline,
-    backdrop_copy: wgpu::RenderPipeline,
-}
-
 /// One frame allocation of instance data, ready to bind.
 struct InstanceBinding {
     bind_group: wgpu::BindGroup,
@@ -235,15 +227,6 @@ struct InstanceBindings {
     subpixel_sprites: InstanceBinding,
     polychrome_sprites: InstanceBinding,
     external_images: InstanceBinding,
-}
-
-struct WgpuBindGroupLayouts {
-    globals: wgpu::BindGroupLayout,
-    instances: wgpu::BindGroupLayout,
-    texture: wgpu::BindGroupLayout,
-    surfaces: wgpu::BindGroupLayout,
-    backdrop_blur_weights: wgpu::BindGroupLayout,
-    backdrop: wgpu::BindGroupLayout,
 }
 
 /// One lobe as the shader reads it: bounds then radii, in the same order as
@@ -287,58 +270,6 @@ struct BackdropParams {
     lobes: [BackdropLobe; MAX_GLASS_LOBES],
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BackdropTextureRole {
-    Scene,
-    Sharp,
-    Horizontal,
-    Vertical,
-}
-
-struct CachedBackdropBindGroup {
-    source: BackdropTextureRole,
-    sharp: BackdropTextureRole,
-    bind_group: wgpu::BindGroup,
-}
-
-struct BackdropTextures {
-    _scene: wgpu::Texture,
-    scene_view: wgpu::TextureView,
-    /// The exact framebuffer at one surface's paint order. Liquid samples this
-    /// directly; frosted liquid keeps it for its sharp refracted rim.
-    sharp: wgpu::Texture,
-    sharp_view: wgpu::TextureView,
-    _horizontal: wgpu::Texture,
-    horizontal_view: wgpu::TextureView,
-    _blur_weights: wgpu::Texture,
-    blur_weights_view: wgpu::TextureView,
-    /// Kept nameable rather than view-only: the luminance probe copies its
-    /// sample texels out of the blurred result this texture holds when frost
-    /// is requested.
-    vertical: wgpu::Texture,
-    vertical_view: wgpu::TextureView,
-    width: u32,
-    height: u32,
-    format: wgpu::TextureFormat,
-}
-
-/// A probe readback whose frame has been submitted but whose buffer has not
-/// been read yet. Held for exactly one frame in the common case: the map
-/// completes while the next frame is being encoded, and that frame's collect
-/// folds it into the slot values without ever waiting.
-struct ProbeInflight {
-    buffer: wgpu::Buffer,
-    requests: Vec<u32>,
-    /// Whether the texels came back blue-first, decided by the texture format
-    /// the frame sampled, not by the text subpixel order.
-    bgra: bool,
-    mapped: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
-
-/// One probe sample's stride in the readback buffer. A texel is 4 bytes; the
-/// rest is the copy offset alignment the downlevel backends ask for.
-const PROBE_SAMPLE_STRIDE: usize = 256;
-
 /// Shared GPU context reference, used to coordinate device recovery across multiple windows.
 pub type GpuContext = Rc<RefCell<Option<WgpuContext>>>;
 
@@ -354,60 +285,6 @@ enum InstanceData {
     },
 }
 
-/// GPU resources that must be dropped together during device recovery.
-struct WgpuResources {
-    device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
-    surface: Option<wgpu::Surface<'static>>,
-    pipelines: WgpuPipelines,
-    bind_group_layouts: WgpuBindGroupLayouts,
-    atlas_sampler: wgpu::Sampler,
-    globals_buffer: wgpu::Buffer,
-    globals_bind_group: wgpu::BindGroup,
-    path_globals_bind_group: wgpu::BindGroup,
-    instance_data: InstanceData,
-    path_intermediate_texture: Option<wgpu::Texture>,
-    path_intermediate_view: Option<wgpu::TextureView>,
-    path_msaa_texture: Option<wgpu::Texture>,
-    path_msaa_view: Option<wgpu::TextureView>,
-    backdrop_textures: Option<BackdropTextures>,
-    backdrop_params_buffers: Vec<wgpu::Buffer>,
-    /// One Gaussian-LUT bind group per parameter-buffer slot.
-    backdrop_blur_weight_bind_groups: RefCell<Vec<Option<wgpu::BindGroup>>>,
-    /// One bind group per parameter-buffer slot. Stable scene topology reuses
-    /// it across frames; a role change replaces only that slot.
-    backdrop_bind_groups: RefCell<Vec<Option<CachedBackdropBindGroup>>>,
-    external_image_bind_groups: RefCell<HashMap<ExternalImageId, wgpu::BindGroup>>,
-    atlas_bind_groups: RefCell<HashMap<(u64, AtlasTextureId), wgpu::BindGroup>>,
-    #[cfg(feature = "test-support")]
-    external_image_bind_group_creations: Cell<u64>,
-    #[cfg(feature = "test-support")]
-    atlas_bind_group_creations: Cell<u64>,
-}
-
-/// Renderer cache diagnostics available to validation suites. This type is
-/// intentionally absent from normal production builds.
-#[cfg(feature = "test-support")]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct WgpuRenderCacheStats {
-    pub external_image_bind_group_creations: u64,
-    pub external_image_bind_groups: usize,
-    pub atlas_bind_group_creations: u64,
-    pub atlas_bind_groups: usize,
-}
-
-impl WgpuResources {
-    fn invalidate_intermediate_textures(&mut self) {
-        self.path_intermediate_texture = None;
-        self.path_intermediate_view = None;
-        self.path_msaa_texture = None;
-        self.path_msaa_view = None;
-        self.backdrop_textures = None;
-        self.backdrop_blur_weight_bind_groups.borrow_mut().clear();
-        self.backdrop_bind_groups.borrow_mut().clear();
-    }
-}
-
 pub struct WgpuRenderer {
     /// Shared GPU context for device recovery coordination (unused on WASM).
     #[allow(dead_code)]
@@ -415,7 +292,7 @@ pub struct WgpuRenderer {
     /// Compositor GPU hint for adapter selection (unused on WASM).
     #[allow(dead_code)]
     compositor_gpu: Option<CompositorGpuHint>,
-    resources: Option<WgpuResources>,
+    resources: Option<RendererShared>,
     surface_config: wgpu::SurfaceConfiguration,
     atlas: Arc<WgpuAtlas>,
     path_globals_offset: u64,
@@ -442,13 +319,13 @@ pub struct WgpuRenderer {
 }
 
 impl WgpuRenderer {
-    fn resources(&self) -> &WgpuResources {
+    fn resources(&self) -> &RendererShared {
         self.resources
             .as_ref()
             .expect("GPU resources not available")
     }
 
-    fn resources_mut(&mut self) -> &mut WgpuResources {
+    fn resources_mut(&mut self) -> &mut RendererShared {
         self.resources
             .as_mut()
             .expect("GPU resources not available")
@@ -916,7 +793,7 @@ impl WgpuRenderer {
             Arc::clone(&last_error),
         );
 
-        let resources = WgpuResources {
+        let resources = RendererShared {
             device,
             queue,
             surface,
@@ -929,20 +806,13 @@ impl WgpuRenderer {
             instance_data,
             // Defer intermediate texture creation to first draw call via ensure_intermediate_textures().
             // This avoids panics when the device/surface is in an invalid state during initialization.
-            path_intermediate_texture: None,
-            path_intermediate_view: None,
-            path_msaa_texture: None,
-            path_msaa_view: None,
-            backdrop_textures: None,
-            backdrop_params_buffers: Vec::new(),
-            backdrop_blur_weight_bind_groups: RefCell::new(Vec::new()),
-            backdrop_bind_groups: RefCell::new(Vec::new()),
+            window: WindowRendererState::default(),
             external_image_bind_groups: RefCell::new(HashMap::new()),
             atlas_bind_groups: RefCell::new(HashMap::new()),
             #[cfg(feature = "test-support")]
-            external_image_bind_group_creations: Cell::new(0),
+            external_image_bind_group_creations: std::cell::Cell::new(0),
             #[cfg(feature = "test-support")]
-            atlas_bind_group_creations: Cell::new(0),
+            atlas_bind_group_creations: std::cell::Cell::new(0),
         };
 
         Ok(Self {
@@ -1722,7 +1592,7 @@ impl WgpuRenderer {
     }
 
     fn ensure_intermediate_textures(&mut self) {
-        if self.resources().path_intermediate_texture.is_some() {
+        if self.resources().window.path_intermediate_texture.is_some() {
             return;
         }
 
@@ -1733,8 +1603,8 @@ impl WgpuRenderer {
         let resources = self.resources_mut();
 
         let (t, v) = Self::create_path_intermediate(&resources.device, format, width, height);
-        resources.path_intermediate_texture = Some(t);
-        resources.path_intermediate_view = Some(v);
+        resources.window.path_intermediate_texture = Some(t);
+        resources.window.path_intermediate_view = Some(v);
 
         let (path_msaa_texture, path_msaa_view) = Self::create_msaa_if_needed(
             &resources.device,
@@ -1745,8 +1615,8 @@ impl WgpuRenderer {
         )
         .map(|(t, v)| (Some(t), Some(v)))
         .unwrap_or((None, None));
-        resources.path_msaa_texture = path_msaa_texture;
-        resources.path_msaa_view = path_msaa_view;
+        resources.window.path_msaa_texture = path_msaa_texture;
+        resources.window.path_msaa_view = path_msaa_view;
     }
 
     fn ensure_backdrop_resources(&mut self, required_passes: usize) {
@@ -1759,6 +1629,7 @@ impl WgpuRenderer {
         let format = self.surface_config.format;
         let resources = self.resources_mut();
         let textures_match = resources
+            .window
             .backdrop_textures
             .as_ref()
             .is_some_and(|textures| {
@@ -1808,7 +1679,7 @@ impl WgpuRenderer {
             });
             let blur_weights_view =
                 blur_weights.create_view(&wgpu::TextureViewDescriptor::default());
-            resources.backdrop_textures = Some(BackdropTextures {
+            resources.window.backdrop_textures = Some(BackdropTextures {
                 _scene: scene,
                 scene_view,
                 sharp,
@@ -1825,8 +1696,9 @@ impl WgpuRenderer {
             });
         }
 
-        while resources.backdrop_params_buffers.len() < required_passes {
+        while resources.window.backdrop_params_buffers.len() < required_passes {
             resources
+                .window
                 .backdrop_params_buffers
                 .push(resources.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("backdrop_params"),
@@ -2326,15 +2198,19 @@ impl WgpuRenderer {
         let backdrop_textures = if required_backdrop_passes == 0 {
             None
         } else {
-            self.resources().backdrop_textures.as_ref().map(|textures| {
-                (
-                    textures.scene_view.clone(),
-                    textures.horizontal_view.clone(),
-                    textures.vertical_view.clone(),
-                    textures.sharp_view.clone(),
-                    textures.blur_weights_view.clone(),
-                )
-            })
+            self.resources()
+                .window
+                .backdrop_textures
+                .as_ref()
+                .map(|textures| {
+                    (
+                        textures.scene_view.clone(),
+                        textures.horizontal_view.clone(),
+                        textures.vertical_view.clone(),
+                        textures.sharp_view.clone(),
+                        textures.blur_weights_view.clone(),
+                    )
+                })
         };
         let render_view = backdrop_textures
             .as_ref()
@@ -2342,6 +2218,7 @@ impl WgpuRenderer {
             .unwrap_or(target_view);
         let params_buffers = self
             .resources()
+            .window
             .backdrop_params_buffers
             .get(..required_backdrop_passes)
             .context("insufficient backdrop parameter buffers")?
@@ -2873,7 +2750,7 @@ impl WgpuRenderer {
         if slot == NO_LUMINANCE_PROBE || slot as usize >= MAX_LUMINANCE_PROBES {
             return;
         }
-        let Some(textures) = self.resources().backdrop_textures.as_ref() else {
+        let Some(textures) = self.resources().window.backdrop_textures.as_ref() else {
             return;
         };
         let probe_texture = if pass_count > 0 {
@@ -2988,7 +2865,10 @@ impl WgpuRenderer {
         resources
             .queue
             .write_buffer(buffer, 0, bytemuck::bytes_of(params));
-        let mut bind_groups = resources.backdrop_blur_weight_bind_groups.borrow_mut();
+        let mut bind_groups = resources
+            .window
+            .backdrop_blur_weight_bind_groups
+            .borrow_mut();
         if bind_groups.len() <= buffer_index {
             bind_groups.resize_with(buffer_index + 1, || None);
         }
@@ -3048,7 +2928,7 @@ impl WgpuRenderer {
         resources
             .queue
             .write_buffer(buffer, 0, bytemuck::bytes_of(params));
-        let mut bind_groups = resources.backdrop_bind_groups.borrow_mut();
+        let mut bind_groups = resources.window.backdrop_bind_groups.borrow_mut();
         if bind_groups.len() <= buffer_index {
             bind_groups.resize_with(buffer_index + 1, || None);
         }
@@ -3364,7 +3244,8 @@ impl WgpuRenderer {
             vec![PathSprite { bounds }]
         };
 
-        let Some(path_intermediate_view) = self.resources().path_intermediate_view.clone() else {
+        let Some(path_intermediate_view) = self.resources().window.path_intermediate_view.clone()
+        else {
             return Ok(());
         };
         let instances =
@@ -3413,15 +3294,16 @@ impl WgpuRenderer {
         )?;
 
         let resources = self.resources();
-        let Some(path_intermediate_view) = resources.path_intermediate_view.as_ref() else {
+        let Some(path_intermediate_view) = resources.window.path_intermediate_view.as_ref() else {
             return Ok(false);
         };
 
-        let (target_view, resolve_target) = if let Some(ref msaa_view) = resources.path_msaa_view {
-            (msaa_view, Some(path_intermediate_view))
-        } else {
-            (path_intermediate_view, None)
-        };
+        let (target_view, resolve_target) =
+            if let Some(ref msaa_view) = resources.window.path_msaa_view {
+                (msaa_view, Some(path_intermediate_view))
+            } else {
+                (path_intermediate_view, None)
+            };
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3528,7 +3410,7 @@ impl WgpuRenderer {
         })
     }
 
-    fn write_instance_texture(resources: &WgpuResources, offset: u64, data: &[u8]) {
+    fn write_instance_texture(resources: &RendererShared, offset: u64, data: &[u8]) {
         let InstanceData::Texture {
             texture,
             width,
@@ -3841,48 +3723,6 @@ impl WgpuRenderer {
 
         log::info!("GPU recovery complete");
         Ok(())
-    }
-}
-
-fn instance_range(range: Range<usize>) -> Range<u32> {
-    range.start as u32..range.end as u32
-}
-
-fn backdrop_glass_render_pass_count(pass_count: u32) -> usize {
-    pass_count as usize * 2 + 2 + usize::from(pass_count > 0)
-}
-
-fn planned_backdrop_glass_pass_count(
-    blur: &BackdropGlass,
-    remaining_gaussian_render_passes: &mut usize,
-) -> u32 {
-    let requested = blur.gaussian_pass_count().unwrap_or(0);
-    let requested_passes = requested as usize * 2;
-    if requested_passes <= *remaining_gaussian_render_passes {
-        *remaining_gaussian_render_passes -= requested_passes;
-        requested
-    } else {
-        0
-    }
-}
-
-fn batch_first_order(scene: &Scene, batch: &PrimitiveBatch) -> DrawOrder {
-    match batch {
-        PrimitiveBatch::Shadows(range) => scene.shadows[range.start].order,
-        PrimitiveBatch::Quads(range) => scene.quads[range.start].order,
-        PrimitiveBatch::Paths(range) => scene.paths[range.start].order,
-        PrimitiveBatch::Underlines(range) => scene.underlines[range.start].order,
-        PrimitiveBatch::MonochromeSprites { range, .. } => {
-            scene.monochrome_sprites[range.start].order
-        }
-        PrimitiveBatch::SubpixelSprites { range, .. } => scene.subpixel_sprites[range.start].order,
-        PrimitiveBatch::PolychromeSprites { range, .. } => {
-            scene.polychrome_sprites[range.start].order
-        }
-        PrimitiveBatch::Surfaces(range) => scene.surfaces[range.start].order,
-        PrimitiveBatch::ExternalImages { range, .. } => {
-            scene.external_images[range.start].sprite.order
-        }
     }
 }
 
