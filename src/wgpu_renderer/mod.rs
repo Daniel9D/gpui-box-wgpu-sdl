@@ -315,6 +315,10 @@ pub struct WgpuRenderer {
     needs_redraw: bool,
     probe_inflight: Option<ProbeInflight>,
     probe_values: [Option<f32>; MAX_LUMINANCE_PROBES],
+    probe_request_pool: Vec<u32>,
+    frame_external_sprites: Vec<gpui::PolychromeSprite>,
+    frame_external_image_bind_groups: HashMap<ExternalImageId, wgpu::BindGroup>,
+    frame_live_external_image_ids: std::collections::HashSet<ExternalImageId>,
     wait_for_probes: bool,
 }
 
@@ -841,6 +845,10 @@ impl WgpuRenderer {
             needs_redraw: false,
             probe_inflight: None,
             probe_values: [None; MAX_LUMINANCE_PROBES],
+            probe_request_pool: Vec::new(),
+            frame_external_sprites: Vec::new(),
+            frame_external_image_bind_groups: HashMap::new(),
+            frame_live_external_image_ids: std::collections::HashSet::new(),
             wait_for_probes: false,
         })
     }
@@ -2154,7 +2162,7 @@ impl WgpuRenderer {
                     scene.polychrome_sprites.len(),
                 )
             })?;
-        let external_image_bind_groups = self.create_external_image_bind_groups(scene)?;
+        let mut external_image_bind_groups = self.create_external_image_bind_groups(scene)?;
 
         let mut remaining_backdrop_passes = MAX_BACKDROP_GLASS_GAUSSIAN_RENDER_PASSES_PER_FRAME;
         let backdrop_pass_count = scene
@@ -2187,7 +2195,8 @@ impl WgpuRenderer {
                     mapped_at_creation: false,
                 })
         });
-        let mut probe_requests: Vec<u32> = Vec::new();
+        let mut probe_requests = std::mem::take(&mut self.probe_request_pool);
+        probe_requests.clear();
 
         let mut encoder =
             self.resources()
@@ -2531,7 +2540,12 @@ impl WgpuRenderer {
                 bgra,
                 mapped,
             });
+        } else {
+            probe_requests.clear();
+            self.probe_request_pool = probe_requests;
         }
+        external_image_bind_groups.clear();
+        self.frame_external_image_bind_groups = external_image_bind_groups;
         Ok(())
     }
 
@@ -2843,6 +2857,10 @@ impl WgpuRenderer {
             }
             self.probe_values[slot as usize] = Some(total / LUMINANCE_PROBE_SAMPLES as f32);
         }
+        drop(data);
+        let mut requests = inflight.requests;
+        requests.clear();
+        self.probe_request_pool = requests;
     }
 
     /// The luminance the most recently completed frame read for this slot.
@@ -3005,47 +3023,48 @@ impl WgpuRenderer {
         scene: &Scene,
         instance_offset: &mut u64,
     ) -> Result<InstanceBindings> {
-        let external_sprites = scene
-            .external_images
-            .iter()
-            .map(|image| image.sprite)
-            .collect::<Vec<_>>();
+        let quads =
+            self.write_instance_binding("quads_bind_group", instance_offset, &scene.quads)?;
+        let shadows =
+            self.write_instance_binding("shadows_bind_group", instance_offset, &scene.shadows)?;
+        let underlines = self.write_instance_binding(
+            "underlines_bind_group",
+            instance_offset,
+            &scene.underlines,
+        )?;
+        let monochrome_sprites = self.write_instance_binding(
+            "monochrome_sprites_bind_group",
+            instance_offset,
+            &scene.monochrome_sprites,
+        )?;
+        let subpixel_sprites = self.write_instance_binding(
+            "subpixel_sprites_bind_group",
+            instance_offset,
+            &scene.subpixel_sprites,
+        )?;
+        let polychrome_sprites = self.write_instance_binding(
+            "polychrome_sprites_bind_group",
+            instance_offset,
+            &scene.polychrome_sprites,
+        )?;
+        let mut external_sprites = std::mem::take(&mut self.frame_external_sprites);
+        external_sprites.clear();
+        external_sprites.extend(scene.external_images.iter().map(|image| image.sprite));
+        let external_images = self.write_instance_binding(
+            "external_images_bind_group",
+            instance_offset,
+            &external_sprites,
+        );
+        external_sprites.clear();
+        self.frame_external_sprites = external_sprites;
         Ok(InstanceBindings {
-            quads: self.write_instance_binding(
-                "quads_bind_group",
-                instance_offset,
-                &scene.quads,
-            )?,
-            shadows: self.write_instance_binding(
-                "shadows_bind_group",
-                instance_offset,
-                &scene.shadows,
-            )?,
-            underlines: self.write_instance_binding(
-                "underlines_bind_group",
-                instance_offset,
-                &scene.underlines,
-            )?,
-            monochrome_sprites: self.write_instance_binding(
-                "monochrome_sprites_bind_group",
-                instance_offset,
-                &scene.monochrome_sprites,
-            )?,
-            subpixel_sprites: self.write_instance_binding(
-                "subpixel_sprites_bind_group",
-                instance_offset,
-                &scene.subpixel_sprites,
-            )?,
-            polychrome_sprites: self.write_instance_binding(
-                "polychrome_sprites_bind_group",
-                instance_offset,
-                &scene.polychrome_sprites,
-            )?,
-            external_images: self.write_instance_binding(
-                "external_images_bind_group",
-                instance_offset,
-                &external_sprites,
-            )?,
+            quads,
+            shadows,
+            underlines,
+            monochrome_sprites,
+            subpixel_sprites,
+            polychrome_sprites,
+            external_images: external_images?,
         })
     }
 
@@ -3074,19 +3093,23 @@ impl WgpuRenderer {
     }
 
     fn create_external_image_bind_groups(
-        &self,
+        &mut self,
         scene: &Scene,
     ) -> Result<HashMap<ExternalImageId, wgpu::BindGroup>> {
-        let live_ids = scene
-            .external_images
-            .iter()
-            .map(|painted| painted.image.id())
-            .collect::<std::collections::HashSet<_>>();
+        let mut live_ids = std::mem::take(&mut self.frame_live_external_image_ids);
+        live_ids.clear();
+        live_ids.extend(
+            scene
+                .external_images
+                .iter()
+                .map(|painted| painted.image.id()),
+        );
         self.resources()
             .external_image_bind_groups
             .borrow_mut()
             .retain(|image_id, _| live_ids.contains(image_id));
-        let mut bind_groups = HashMap::new();
+        let mut bind_groups = std::mem::take(&mut self.frame_external_image_bind_groups);
+        bind_groups.clear();
         for painted in &scene.external_images {
             let image_id = painted.image.id();
             if bind_groups.contains_key(&image_id) {
@@ -3132,6 +3155,8 @@ impl WgpuRenderer {
                 .set(self.resources().external_image_bind_group_creations.get() + 1);
             bind_groups.insert(image_id, bind_group);
         }
+        live_ids.clear();
+        self.frame_live_external_image_ids = live_ids;
         Ok(bind_groups)
     }
 
