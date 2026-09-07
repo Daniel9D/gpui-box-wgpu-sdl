@@ -28,6 +28,8 @@ pub struct WgpuWindowState {
 pub enum WgpuWindowError {
     ForeignRuntime,
     Closed,
+    EntityAlreadyAttached,
+    WrongEntity,
 }
 
 impl std::fmt::Display for WgpuWindowError {
@@ -35,6 +37,8 @@ impl std::fmt::Display for WgpuWindowError {
         match self {
             Self::ForeignRuntime => formatter.write_str("window belongs to another WgpuRuntime"),
             Self::Closed => formatter.write_str("window is closed"),
+            Self::EntityAlreadyAttached => formatter.write_str("entity is already attached"),
+            Self::WrongEntity => formatter.write_str("entity is not attached to this window"),
         }
     }
 }
@@ -62,12 +66,14 @@ pub struct WgpuRuntime {
     platform: Rc<EmbeddedPlatform>,
     app: gpui::ApplicationHandle,
     windows: SlotMap<RuntimeWindowKey, RuntimeWindow>,
+    attached_entities: std::collections::HashSet<gpui::EntityId>,
 }
 
 struct RuntimeWindow {
     handle: gpui::AnyWindowHandle,
     render: Rc<RefCell<WindowRenderState>>,
     redraw_pending: bool,
+    root_entity_id: gpui::EntityId,
 }
 
 struct WindowRenderTarget {
@@ -118,6 +124,7 @@ impl WgpuRuntime {
             platform,
             app,
             windows: SlotMap::with_key(),
+            attached_entities: std::collections::HashSet::new(),
         })
     }
 
@@ -188,18 +195,49 @@ impl WgpuRuntime {
                     state.error = Some(error);
                 }
             }));
+        let root = root.expect("GPUI invokes the root builder while opening the window");
+        let root_entity_id = root.entity_id();
+        let inserted = self.attached_entities.insert(root_entity_id);
+        debug_assert!(inserted, "a newly built root entity cannot already be attached");
         let key = self.windows.insert(RuntimeWindow {
             handle,
             render,
             redraw_pending: true,
+            root_entity_id,
         });
         Ok((
             WgpuWindow {
                 runtime_id: self.runtime_id,
                 key: key.data().as_ffi(),
             },
-            root.expect("GPUI invokes the root builder while opening the window"),
+            root,
         ))
+    }
+
+    pub fn open_window_with_entity<V: gpui::Render + 'static>(
+        &mut self,
+        initial_size: gpui::Size<gpui::Pixels>,
+        entity: gpui::Entity<V>,
+    ) -> anyhow::Result<WgpuWindow> {
+        if self.attached_entities.contains(&entity.entity_id()) {
+            return Err(WgpuWindowError::EntityAlreadyAttached.into());
+        }
+        let (window, _) = self.open_window(initial_size, move |_, _| entity)?;
+        Ok(window)
+    }
+
+    pub fn detach_window<V: gpui::Render + 'static>(
+        &mut self,
+        window: WgpuWindow,
+        entity: &gpui::Entity<V>,
+    ) -> anyhow::Result<gpui::Entity<V>> {
+        let key = self.window_key(window)?;
+        if self.windows[key].root_entity_id != entity.entity_id() {
+            return Err(WgpuWindowError::WrongEntity.into());
+        }
+        let entity = entity.clone();
+        self.close_window(window)?;
+        Ok(entity)
     }
 
     pub fn render_window(
@@ -378,7 +416,11 @@ impl WgpuRuntime {
     pub fn close_window(&mut self, window: WgpuWindow) -> anyhow::Result<()> {
         let key = self.window_key(window)?;
         self.platform.force_close(self.windows[key].handle)?;
-        self.windows.remove(key);
+        let closed = self
+            .windows
+            .remove(key)
+            .expect("validated runtime window must still exist");
+        self.attached_entities.remove(&closed.root_entity_id);
         self.pump();
         Ok(())
     }
@@ -391,7 +433,11 @@ impl WgpuRuntime {
         if self.platform.window(handle).is_some() {
             Ok(CloseOutcome::KeptOpen)
         } else {
-            self.windows.remove(key);
+            let closed = self
+                .windows
+                .remove(key)
+                .expect("validated runtime window must still exist");
+            self.attached_entities.remove(&closed.root_entity_id);
             Ok(CloseOutcome::Closed)
         }
     }
@@ -426,6 +472,18 @@ impl WgpuRuntime {
 
     fn window_handle(&self, window: WgpuWindow) -> anyhow::Result<gpui::AnyWindowHandle> {
         Ok(self.windows[self.window_key(window)?].handle)
+    }
+}
+
+impl Drop for WgpuRuntime {
+    fn drop(&mut self) {
+        let handles: Vec<_> = self.windows.values().map(|window| window.handle).collect();
+        for handle in handles {
+            let _ = self.platform.force_close(handle);
+        }
+        self.windows.clear();
+        self.attached_entities.clear();
+        self.pump();
     }
 }
 
