@@ -15,12 +15,16 @@ Revision: ab8f37f6cbdee575f78cd4564597e9ae4d44e65c
 - crates/gpui_wgpu/src/wgpu_renderer.rs
 - crates/gpui/src/app/headless_app_context.rs
 - crates/gpui/src/platform/test/platform.rs
+- crates/gpui/src/platform.rs
+- crates/gpui/src/platform/threaded_dispatcher.rs
+- CHANGELOG.md
 - FORK_PATCHES.md
 - UPSTREAM.md
 
 The first eight paths implement backend-neutral external images. The WGPU
 renderer path also corrects the upstream uniform-layout test's stale 128-byte
-header expectation after edge-mask fields expanded it to 144 bytes. The final
-two Rust paths temporarily preserve current host clipboard/cursor behavior and
-are removed when WgpuHost moves to EmbeddedPlatform. UPSTREAM.md and this
-manifest record provenance only.
+header expectation after edge-mask fields expanded it to 144 bytes. The test
+platform paths preserve compatibility tests. `platform.rs`,
+`platform/threaded_dispatcher.rs`, and `CHANGELOG.md` expose and document the
+host-driven realtime dispatcher used by `EmbeddedPlatform` without enabling
+GPUI's test-support feature. UPSTREAM.md and this manifest record provenance.
