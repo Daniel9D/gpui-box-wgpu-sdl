@@ -172,7 +172,7 @@
 - Modify: `src/lib.rs`
 
 **Steps:**
-1. Move GPU-global pipelines/layouts/atlas/caches into `RendererShared` and target-sized resources into `WindowRendererState`.
+1. Move compatible pipelines/layouts/atlas and the atlas cache into `RendererShared`; keep target-sized resources and scene-liveness-dependent external-image caches per window.
 2. Move render passes, probes, and cache helpers into focused modules, keeping all existing public names and signatures.
 3. Run `cargo fmt`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and the full native suite.
 

@@ -68,6 +68,7 @@ pub struct WgpuRuntime {
     windows: SlotMap<RuntimeWindowKey, RuntimeWindow>,
     attached_entities: std::collections::HashSet<gpui::EntityId>,
     execution_mode: WgpuExecutionMode,
+    renderer_shared: Option<crate::wgpu_renderer::shared::RendererSharedHandle>,
 }
 
 struct RuntimeWindow {
@@ -162,6 +163,7 @@ impl WgpuRuntime {
             windows: SlotMap::with_key(),
             attached_entities: std::collections::HashSet::new(),
             execution_mode: builder.execution_mode,
+            renderer_shared: None,
         })
     }
 
@@ -211,13 +213,18 @@ impl WgpuRuntime {
             )
         })?;
         let handle = handle.into();
+        let renderer = WgpuHeadlessRenderer::from_context(
+            &self.context,
+            self.atlas.clone(),
+            self.target_format,
+            self.execution_mode == WgpuExecutionMode::Deterministic,
+            self.renderer_shared.clone(),
+        )?;
+        if self.renderer_shared.is_none() {
+            self.renderer_shared = Some(renderer.shared_resources());
+        }
         let render = Rc::new(RefCell::new(WindowRenderState {
-            renderer: WgpuHeadlessRenderer::from_context(
-                &self.context,
-                self.atlas.clone(),
-                self.target_format,
-                self.execution_mode == WgpuExecutionMode::Deterministic,
-            )?,
+            renderer,
             target: None,
             error: None,
         }));
@@ -523,6 +530,18 @@ impl WgpuRuntime {
     ) -> anyhow::Result<crate::WgpuRenderCacheStats> {
         let key = self.window_key(window)?;
         Ok(self.windows[key].render.borrow().renderer.cache_stats())
+    }
+
+    /// Confirms that two windows reuse the same immutable GPU resources.
+    #[cfg(feature = "test-support")]
+    pub fn windows_share_renderer_resources(
+        &self,
+        first: WgpuWindow,
+        second: WgpuWindow,
+    ) -> anyhow::Result<bool> {
+        let first = self.windows[self.window_key(first)?].render.borrow();
+        let second = self.windows[self.window_key(second)?].render.borrow();
+        Ok(first.renderer.shares_resources_with(&second.renderer))
     }
 
     pub fn pump(&mut self) {

@@ -2,7 +2,10 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use gpui::{AppContext, Context, IntoElement, Render, Styled, Window, div, px};
+use gpui::{
+    AppContext, Context, Corners, GlassMaterial, IntoElement, ParentElement, Render, Styled,
+    Window, canvas, div, px,
+};
 use gpui_wgpu::{CosmicTextSystem, ExternalGpu, WgpuRuntime, WgpuWindowError};
 
 struct EmptyView;
@@ -18,6 +21,24 @@ struct GreenView;
 impl Render for GreenView {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div().size_full().bg(gpui::rgb(0x00ff00))
+    }
+}
+
+struct LuminanceProbeView;
+
+impl Render for LuminanceProbeView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().bg(gpui::rgb(0xffffff)).child(
+            canvas(
+                |_, _, _| (),
+                |bounds, (), window, _| {
+                    let mut material = GlassMaterial::clear();
+                    material.probe = 0;
+                    window.paint_backdrop_glass(bounds, Corners::all(px(0.0)), material, &[]);
+                },
+            )
+            .size_full(),
+        )
     }
 }
 
@@ -44,6 +65,13 @@ fn runtime_renders_two_windows_into_independent_caller_texture_views() {
             cx.new(|_| GreenView)
         })
         .unwrap();
+    #[cfg(feature = "test-support")]
+    assert!(
+        runtime
+            .windows_share_renderer_resources(window, green_window)
+            .unwrap(),
+        "compatible runtime windows should share pipelines and layouts"
+    );
     let extent = wgpu::Extent3d {
         width: 64,
         height: 64,
@@ -217,6 +245,66 @@ fn closing_one_runtime_window_does_not_close_its_sibling() {
             .downcast_ref(),
         Some(WgpuWindowError::ForeignRuntime)
     ));
+}
+
+#[test]
+fn realtime_runtime_completes_luminance_probes_through_nonblocking_pump() {
+    let _gpu_guard = gpu_test_guard();
+    let Some(gpu) = gpu() else { return };
+    let device = gpu.device.clone();
+    let mut runtime = WgpuRuntime::new(
+        gpu,
+        wgpu::TextureFormat::Rgba8Unorm,
+        Arc::new(CosmicTextSystem::new_without_system_fonts("sans-serif")),
+        Arc::new(()),
+    )
+    .unwrap();
+    let (window, _) = runtime
+        .open_window(gpui::size(px(32.0), px(32.0)), |_, cx| {
+            cx.new(|_| LuminanceProbeView)
+        })
+        .unwrap();
+    let extent = wgpu::Extent3d {
+        width: 32,
+        height: 32,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("runtime_realtime_probe_target"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+
+    runtime
+        .render_window(
+            window,
+            &texture.create_view(&Default::default()),
+            extent,
+            1.0,
+        )
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let luminance = loop {
+        if let Some(value) = runtime
+            .update_window(window, |window, _| window.backdrop_luminance(0))
+            .unwrap()
+        {
+            break value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "realtime luminance probe did not complete"
+        );
+        runtime.pump();
+        std::thread::yield_now();
+    };
+    assert!(luminance > 0.95, "unexpected luminance: {luminance}");
 }
 
 fn gpu_test_guard() -> MutexGuard<'static, ()> {

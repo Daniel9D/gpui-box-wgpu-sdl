@@ -220,26 +220,29 @@ into files.
 
 `RendererShared` contains:
 
-- the caller-provided `Instance`, `Adapter`, `Arc<Device>`, and `Arc<Queue>`;
-- target format and immutable device capabilities;
-- pipelines, bind-group layouts, samplers, and shared uniform infrastructure;
+- the caller-provided `Arc<Device>` and `Arc<Queue>`;
+- target format and immutable device capabilities used to validate sharing;
+- pipelines, bind-group layouts, and samplers;
 - sprite atlas;
-- external-image bind-group cache;
 - atlas bind-group cache;
-- device generation and shared error state.
 
-`RendererWindowState` contains:
+The runtime's `WgpuContext`, outside this block, retains the `Instance` and
+`Adapter`. Each window renderer contains:
 
 - current physical size;
+- surface, globals/uniform buffer and instance-data allocation;
 - path and MSAA intermediate textures;
 - backdrop sharp/blur textures and parameter buffers;
-- in-flight luminance-probe readback ring;
+- at most one in-flight luminance-probe readback; realtime frames preserve it
+  until completion instead of replacing it;
 - last completed luminance value for each slot;
-- per-window frame and submission bookkeeping.
+- per-window frame and submission bookkeeping;
+- the external-image bind-group cache, whose liveness follows that window's
+  current scene rather than another window's scene.
 
-Frame buffers that are safe to reuse across sequential renders may stay in
-`RendererShared`. Data whose lifetime crosses a submission or whose meaning
-depends on window size stays in `RendererWindowState`.
+Frame scratch buffers that are safe to reuse across sequential renders stay on
+the per-window renderer. Data whose lifetime crosses a submission or whose
+meaning depends on window size likewise remains window-local.
 
 ## Public API
 
@@ -749,16 +752,11 @@ multi-window path is correct.
 
 ### External images
 
-The shared cache key is `ExternalImageId`. Each value contains:
-
-- `Weak<ExternalImageHandle>`;
-- `wgpu::BindGroup`;
-- the device generation for which it was created.
-
-The weak handle prevents the cache from extending the engine texture's
-lifetime. Dead entries are pruned, and device recovery clears the complete
-cache. IDs are process-unique and are never treated as reusable texture
-versions.
+Each window renderer caches `ExternalImageId -> wgpu::BindGroup`. Entries not
+present in that window's current scene are pruned before drawing, so one
+window cannot evict another window's live entry and the cache does not extend
+an absent engine texture indefinitely. IDs are process-unique and are never
+treated as reusable texture versions.
 
 The first insertion verifies that the payload is a compatible
 `WgpuImagePayload` for the current device. A failed validation does not insert
@@ -767,9 +765,11 @@ an entry or poison later images.
 ### Atlas
 
 Atlas texture bind groups are keyed by `AtlasTextureId` plus texture/view
-generation. Entries are invalidated when the view changes, the atlas is
-rebuilt, or the device generation changes. Cache lifetime is bounded by live
-atlas textures.
+generation. Every newly created texture view receives a monotonically changing
+generation, including when a freed `AtlasTextureId` slot is reused. A miss for
+the new generation replaces only that texture ID's entry, preserving other live
+atlas textures; atlas rebuild or device recovery likewise cannot reuse an old
+key.
 
 ### Frame allocations
 

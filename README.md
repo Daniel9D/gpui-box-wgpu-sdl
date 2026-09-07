@@ -67,7 +67,9 @@ fn render(
 
 Text and sprites require scene resources from the renderer's atlas. Use
 `WgpuRuntime` to let one GPUI application build scenes for any number of SDL
-windows while sharing the device, queue, atlas, clipboard, and application state.
+windows while sharing the device, queue, atlas, compatible pipelines/layouts,
+clipboard, and application state. Surfaces, target-sized intermediates,
+in-flight probes, and external-image cache lifetimes remain isolated per window.
 
 ## Multi-window runtime
 

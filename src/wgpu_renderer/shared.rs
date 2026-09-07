@@ -1,4 +1,4 @@
-/// Immutable pipelines shared by every pass owned by one renderer instance.
+/// Immutable pipelines shared by every pass of compatible renderer instances.
 pub(super) struct WgpuPipelines {
     pub quads: wgpu::RenderPipeline,
     pub shadows: wgpu::RenderPipeline,
@@ -18,6 +18,7 @@ pub(super) struct WgpuPipelines {
     pub backdrop_copy: wgpu::RenderPipeline,
 }
 
+#[derive(Clone)]
 pub(super) struct WgpuBindGroupLayouts {
     pub globals: wgpu::BindGroupLayout,
     pub instances: wgpu::BindGroupLayout,
@@ -27,39 +28,60 @@ pub(super) struct WgpuBindGroupLayouts {
     pub backdrop: wgpu::BindGroupLayout,
 }
 
-/// GPU-global resources and caches shared by all passes of one renderer. The
-/// target-sized allocation set is isolated in `window` so resize/recovery can
-/// invalidate it without rebuilding immutable pipelines and layouts.
-pub(super) struct RendererShared {
-    pub device: Arc<wgpu::Device>,
-    pub queue: Arc<wgpu::Queue>,
+/// Device-scoped immutable resources that compatible windows can reuse.
+pub(crate) struct RendererShared {
+    pub(super) device: Arc<wgpu::Device>,
+    pub(super) queue: Arc<wgpu::Queue>,
+    pub(super) pipelines: WgpuPipelines,
+    pub(super) bind_group_layouts: WgpuBindGroupLayouts,
+    pub(super) atlas_sampler: wgpu::Sampler,
+    pub(super) atlas: Arc<WgpuAtlas>,
+    pub(super) surface_format: wgpu::TextureFormat,
+    pub(super) alpha_mode: wgpu::CompositeAlphaMode,
+    pub(super) path_sample_count: u32,
+    pub(super) dual_source_blending: bool,
+    pub(super) uses_webgl_instance_data: bool,
+    pub(super) atlas_bind_groups: RefCell<HashMap<AtlasTextureId, (u64, wgpu::BindGroup)>>,
+    #[cfg(feature = "test-support")]
+    pub(super) atlas_bind_group_creations: Cell<u64>,
+}
+
+pub(crate) type RendererSharedHandle = Rc<RendererShared>;
+
+/// Mutable resources isolated to one window/target. Dereferencing exposes the
+/// compatible immutable GPU resources without duplicating them per window.
+pub(super) struct RendererResources {
+    pub shared: RendererSharedHandle,
     pub surface: Option<wgpu::Surface<'static>>,
-    pub pipelines: WgpuPipelines,
-    pub bind_group_layouts: WgpuBindGroupLayouts,
-    pub atlas_sampler: wgpu::Sampler,
     pub globals_buffer: wgpu::Buffer,
     pub globals_bind_group: wgpu::BindGroup,
     pub path_globals_bind_group: wgpu::BindGroup,
     pub instance_data: InstanceData,
     pub window: WindowRendererState,
     pub external_image_bind_groups: RefCell<HashMap<ExternalImageId, wgpu::BindGroup>>,
-    pub atlas_bind_groups: RefCell<HashMap<(u64, AtlasTextureId), wgpu::BindGroup>>,
     #[cfg(feature = "test-support")]
     pub external_image_bind_group_creations: Cell<u64>,
-    #[cfg(feature = "test-support")]
-    pub atlas_bind_group_creations: Cell<u64>,
 }
 
-impl RendererShared {
+impl RendererResources {
     pub fn invalidate_intermediate_textures(&mut self) {
         self.window.invalidate_intermediate_textures();
     }
 }
-use std::{cell::RefCell, collections::HashMap, sync::Arc};
+
+impl std::ops::Deref for RendererResources {
+    type Target = RendererShared;
+
+    fn deref(&self) -> &Self::Target {
+        &self.shared
+    }
+}
+
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 #[cfg(feature = "test-support")]
 use std::cell::Cell;
 
 use gpui::{AtlasTextureId, ExternalImageId};
 
-use super::{InstanceData, WindowRendererState};
+use super::{InstanceData, WgpuAtlas, WindowRendererState};

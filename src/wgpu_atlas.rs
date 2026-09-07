@@ -82,7 +82,7 @@ impl WgpuAtlas {
         let texture = &lock.storage[id];
         WgpuTextureInfo {
             view: texture.view.clone(),
-            generation: lock.generation,
+            generation: texture.generation,
         }
     }
 
@@ -188,6 +188,8 @@ impl WgpuAtlasState {
         min_size: Size<DevicePixels>,
         kind: AtlasTextureKind,
     ) -> &mut WgpuAtlasTexture {
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
         const DEFAULT_ATLAS_SIZE: Size<DevicePixels> = Size {
             width: DevicePixels(1024),
             height: DevicePixels(1024),
@@ -233,6 +235,7 @@ impl WgpuAtlasState {
             format,
             texture,
             view,
+            generation,
             live_atlas_keys: 0,
         };
 
@@ -354,6 +357,7 @@ struct WgpuAtlasTexture {
     allocator: BucketedAtlasAllocator,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    generation: u64,
     format: wgpu::TextureFormat,
     live_atlas_keys: u32,
 }
@@ -514,6 +518,43 @@ mod tests {
         atlas.remove(&big_key_a);
         let tile_b = insert(&big_key_b, big);
         assert_eq!(tile_b.texture_id, keeper_tile.texture_id);
+        Ok(())
+    }
+
+    #[test]
+    fn reused_texture_slot_gets_a_new_view_generation() -> anyhow::Result<()> {
+        let _gpu = crate::serialised_gpu_test();
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        let size = Size {
+            width: DevicePixels(64),
+            height: DevicePixels(64),
+        };
+        let first_key = AtlasKey::Image(RenderImageParams {
+            image_id: ImageId(10),
+            frame_index: 0,
+        });
+        let second_key = AtlasKey::Image(RenderImageParams {
+            image_id: ImageId(11),
+            frame_index: 0,
+        });
+        let insert = |key: &AtlasKey| {
+            atlas
+                .get_or_insert_with(key, &mut || {
+                    Ok(Some((size, Cow::Owned(vec![0; 64 * 64 * 4]))))
+                })
+                .expect("allocation should succeed")
+                .expect("callback returns Some")
+        };
+
+        let first = insert(&first_key);
+        let first_generation = atlas.get_texture_info(first.texture_id).generation;
+        atlas.remove(&first_key);
+        let second = insert(&second_key);
+        let second_generation = atlas.get_texture_info(second.texture_id).generation;
+
+        assert_eq!(first.texture_id, second.texture_id);
+        assert_ne!(first_generation, second_generation);
         Ok(())
     }
 
