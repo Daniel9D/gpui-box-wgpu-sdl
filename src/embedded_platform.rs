@@ -225,6 +225,11 @@ impl EmbeddedPlatform {
         let window = self
             .window(handle)
             .ok_or_else(|| anyhow::anyhow!("window is closed"))?;
+        let hovered = match &input {
+            PlatformInput::MouseMove(_) => Some(true),
+            PlatformInput::MouseExited(_) => Some(false),
+            _ => None,
+        };
         {
             let mut state = window.0.borrow_mut();
             match &input {
@@ -239,6 +244,9 @@ impl EmbeddedPlatform {
                 }
                 _ => {}
             }
+        }
+        if let Some(hovered) = hovered {
+            window.set_hovered(hovered);
         }
         let callback = window.0.borrow_mut().input.take();
         let result = callback.map(|mut callback| {
