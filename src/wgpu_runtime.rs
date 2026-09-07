@@ -198,7 +198,10 @@ impl WgpuRuntime {
         let root = root.expect("GPUI invokes the root builder while opening the window");
         let root_entity_id = root.entity_id();
         let inserted = self.attached_entities.insert(root_entity_id);
-        debug_assert!(inserted, "a newly built root entity cannot already be attached");
+        debug_assert!(
+            inserted,
+            "a newly built root entity cannot already be attached"
+        );
         let key = self.windows.insert(RuntimeWindow {
             handle,
             render,
@@ -457,6 +460,10 @@ impl WgpuRuntime {
 
     pub fn pump(&mut self) {
         self.dispatcher.run_ready_main_tasks();
+    }
+
+    pub(crate) fn pump_until_idle(&mut self) {
+        self.dispatcher.run_until_idle();
     }
 
     fn window_key(&self, window: WgpuWindow) -> anyhow::Result<RuntimeWindowKey> {

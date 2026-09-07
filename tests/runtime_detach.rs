@@ -43,9 +43,7 @@ fn entity_identity_survives_repeated_detach_and_reattach_cycles() {
         Some(WgpuWindowError::WrongEntity)
     ));
 
-    let entity = runtime
-        .detach_window(first_window, &first_entity)
-        .unwrap();
+    let entity = runtime.detach_window(first_window, &first_entity).unwrap();
     assert_eq!(entity.entity_id(), first_id);
     assert!(matches!(
         runtime
@@ -95,16 +93,15 @@ fn gpu() -> Option<ExternalGpu> {
         ..Default::default()
     }))
     .ok()?;
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("runtime_detach_test"),
-            required_features: wgpu::Features::empty(),
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
-            trace: wgpu::Trace::Off,
-        }))
-        .ok()?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("runtime_detach_test"),
+        required_features: wgpu::Features::empty(),
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        required_limits: wgpu::Limits::downlevel_defaults(),
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+        trace: wgpu::Trace::Off,
+    }))
+    .ok()?;
     Some(ExternalGpu {
         instance,
         adapter,

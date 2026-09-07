@@ -1882,7 +1882,7 @@ impl WgpuRenderer {
         self.max_texture_size
     }
 
-    #[cfg(all(not(target_family = "wasm"), any(test, feature = "host")))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
     fn render_scene_to_image(
         &mut self,
         scene: &Scene,
@@ -1998,7 +1998,7 @@ impl WgpuRenderer {
             .ok_or_else(|| anyhow::anyhow!("Failed to create RgbaImage from headless pixel data"))
     }
 
-    #[cfg(all(not(target_family = "wasm"), any(test, feature = "host")))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
     fn render_scene_offscreen(
         &mut self,
         scene: &Scene,
@@ -2007,7 +2007,7 @@ impl WgpuRenderer {
         self.render_scene_to_texture(scene, size).map(drop)
     }
 
-    #[cfg(all(not(target_family = "wasm"), any(test, feature = "host")))]
+    #[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
     fn render_scene_to_texture(
         &mut self,
         scene: &Scene,
@@ -3849,16 +3849,6 @@ impl WgpuHeadlessRenderer {
         Ok(Self { renderer })
     }
 
-    #[cfg(feature = "host")]
-    pub(crate) fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
-        self.renderer.sprite_atlas().clone()
-    }
-
-    #[cfg(feature = "host")]
-    pub(crate) fn backdrop_luminance(&mut self, slot: u32) -> Option<f32> {
-        self.renderer.backdrop_luminance(slot)
-    }
-
     #[cfg(any(test, feature = "host"))]
     pub fn new() -> anyhow::Result<Self> {
         // Inside this crate's own test binary, building a device without the
@@ -3898,7 +3888,7 @@ impl WgpuHeadlessRenderer {
     }
 }
 
-#[cfg(all(not(target_family = "wasm"), any(test, feature = "host")))]
+#[cfg(all(not(target_family = "wasm"), any(test, feature = "test-support")))]
 impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
     fn render_scene_to_image(
         &mut self,

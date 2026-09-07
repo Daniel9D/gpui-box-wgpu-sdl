@@ -17,8 +17,8 @@ cognitive_complexity = "deny"
 [features]
 default = []
 font-kit = ["dep:font-kit"]
-host = ["gpui/test-support", "dep:image"]
-test-support = ["host"]
+host = ["dep:image"]
+test-support = ["host", "gpui/test-support"]
 kit = ["host", "dep:gpui-kit"]
 
 [dependencies]
