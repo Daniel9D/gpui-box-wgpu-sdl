@@ -23,6 +23,7 @@ type InputCallback = Box<dyn FnMut(PlatformInput) -> DispatchEventResult>;
 type ResizeCallback = Box<dyn FnMut(Size<Pixels>, f32)>;
 type HitTestCallback = Box<dyn FnMut(Point<Pixels>) -> Option<WindowControlArea>>;
 type RenderCallback = Box<dyn FnMut(&Scene)>;
+type LuminanceCallback = Box<dyn FnMut(u32) -> Option<f32>>;
 
 #[derive(Debug)]
 pub(crate) struct EmbeddedDisplay;
@@ -83,6 +84,7 @@ struct EmbeddedWindowState {
     appearance_changed: Option<Box<dyn FnMut()>>,
     appearance: WindowAppearance,
     render: Option<RenderCallback>,
+    backdrop_luminance: Option<LuminanceCallback>,
     ime_area: Option<Bounds<Pixels>>,
 }
 
@@ -290,6 +292,10 @@ impl EmbeddedWindow {
         self.0.borrow_mut().render = Some(callback);
     }
 
+    pub(crate) fn set_luminance_callback(&self, callback: LuminanceCallback) {
+        self.0.borrow_mut().backdrop_luminance = Some(callback);
+    }
+
     fn set_active(&self, active: bool) {
         let callback = {
             let mut state = self.0.borrow_mut();
@@ -469,6 +475,7 @@ impl Platform for EmbeddedPlatform {
             appearance_changed: None,
             appearance: self.appearance.get(),
             render: None,
+            backdrop_luminance: None,
             ime_area: None,
         })));
         self.windows
@@ -711,6 +718,16 @@ impl PlatformWindow for EmbeddedWindow {
                 state.render = Some(render);
             }
         }
+    }
+    fn backdrop_luminance(&self, slot: u32) -> Option<f32> {
+        let callback = self.0.borrow_mut().backdrop_luminance.take();
+        callback.and_then(|mut callback| {
+            let value = callback(slot);
+            if let Ok(mut state) = self.0.try_borrow_mut() {
+                state.backdrop_luminance = Some(callback);
+            }
+            value
+        })
     }
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         self.0.borrow().atlas.clone()

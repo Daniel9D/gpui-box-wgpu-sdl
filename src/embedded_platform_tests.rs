@@ -83,6 +83,36 @@ fn embedded_window_inherits_scale_and_appearance_defaults() {
     );
 }
 
+#[test]
+fn embedded_window_forwards_completed_luminance_probes() {
+    let platform = EmbeddedPlatform::new(
+        Arc::new(ThreadedDispatcher::new()),
+        Arc::new(NoopTextSystem),
+        Arc::new(EmptyAtlas),
+        Rc::new(EmptyDisplay),
+    );
+    let app = Application::new_inaccessible(platform.clone()).run_embedded(|_: &mut App| {});
+    let window = open_window(&app, size(px(100.0), px(80.0)));
+    let calls = Rc::new(std::cell::Cell::new(0));
+    platform
+        .window(window)
+        .unwrap()
+        .set_luminance_callback(Box::new({
+            let calls = calls.clone();
+            move |slot| {
+                calls.set(calls.get() + 1);
+                (slot == 3).then_some(0.75)
+            }
+        }));
+
+    assert_eq!(
+        platform.window(window).unwrap().backdrop_luminance(3),
+        Some(0.75)
+    );
+    assert_eq!(platform.window(window).unwrap().backdrop_luminance(2), None);
+    assert_eq!(calls.get(), 2, "the callback is restored after every query");
+}
+
 struct EmptyAtlas;
 
 impl PlatformAtlas for EmptyAtlas {

@@ -3784,6 +3784,17 @@ impl WgpuHeadlessRenderer {
         self.renderer.render_scene_to_view(scene, size, target_view)
     }
 
+    pub(crate) fn poll(&mut self) {
+        if let Some(resources) = &self.renderer.resources {
+            let _ = resources.device.poll(wgpu::PollType::Poll);
+        }
+        self.renderer.collect_probes();
+    }
+
+    pub(crate) fn backdrop_luminance(&mut self, slot: u32) -> Option<f32> {
+        self.renderer.backdrop_luminance(slot)
+    }
+
     #[cfg(feature = "test-support")]
     pub fn cache_stats(&self) -> WgpuRenderCacheStats {
         self.renderer.cache_stats()

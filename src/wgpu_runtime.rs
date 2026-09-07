@@ -236,6 +236,16 @@ impl WgpuRuntime {
                     state.error = Some(error);
                 }
             }));
+        let luminance = render.clone();
+        self.platform
+            .window(handle)
+            .expect("the embedded platform owns every open GPUI window")
+            .set_luminance_callback(Box::new(move |slot| {
+                luminance
+                    .try_borrow_mut()
+                    .ok()
+                    .and_then(|mut state| state.renderer.backdrop_luminance(slot))
+            }));
         let root = root.expect("GPUI invokes the root builder while opening the window");
         let root_entity_id = root.entity_id();
         let inserted = self.attached_entities.insert(root_entity_id);
@@ -516,6 +526,11 @@ impl WgpuRuntime {
     }
 
     pub fn pump(&mut self) {
+        for window in self.windows.values() {
+            if let Ok(mut render) = window.render.try_borrow_mut() {
+                render.renderer.poll();
+            }
+        }
         match self.execution_mode {
             WgpuExecutionMode::Realtime => {
                 self.dispatcher.run_ready_main_tasks();
