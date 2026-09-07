@@ -10,6 +10,8 @@ use gpui::{
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+#[cfg(feature = "test-support")]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
@@ -375,6 +377,23 @@ struct WgpuResources {
     /// One bind group per parameter-buffer slot. Stable scene topology reuses
     /// it across frames; a role change replaces only that slot.
     backdrop_bind_groups: RefCell<Vec<Option<CachedBackdropBindGroup>>>,
+    external_image_bind_groups: RefCell<HashMap<ExternalImageId, wgpu::BindGroup>>,
+    atlas_bind_groups: RefCell<HashMap<(u64, AtlasTextureId), wgpu::BindGroup>>,
+    #[cfg(feature = "test-support")]
+    external_image_bind_group_creations: Cell<u64>,
+    #[cfg(feature = "test-support")]
+    atlas_bind_group_creations: Cell<u64>,
+}
+
+/// Renderer cache diagnostics available to validation suites. This type is
+/// intentionally absent from normal production builds.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WgpuRenderCacheStats {
+    pub external_image_bind_group_creations: u64,
+    pub external_image_bind_groups: usize,
+    pub atlas_bind_group_creations: u64,
+    pub atlas_bind_groups: usize,
 }
 
 impl WgpuResources {
@@ -419,6 +438,7 @@ pub struct WgpuRenderer {
     needs_redraw: bool,
     probe_inflight: Option<ProbeInflight>,
     probe_values: [Option<f32>; MAX_LUMINANCE_PROBES],
+    wait_for_probes: bool,
 }
 
 impl WgpuRenderer {
@@ -432,6 +452,19 @@ impl WgpuRenderer {
         self.resources
             .as_mut()
             .expect("GPU resources not available")
+    }
+
+    #[cfg(feature = "test-support")]
+    fn cache_stats(&self) -> WgpuRenderCacheStats {
+        let resources = self.resources();
+        WgpuRenderCacheStats {
+            external_image_bind_group_creations: resources
+                .external_image_bind_group_creations
+                .get(),
+            external_image_bind_groups: resources.external_image_bind_groups.borrow().len(),
+            atlas_bind_group_creations: resources.atlas_bind_group_creations.get(),
+            atlas_bind_groups: resources.atlas_bind_groups.borrow().len(),
+        }
     }
 
     /// Creates a new WgpuRenderer from raw window handles.
@@ -904,6 +937,12 @@ impl WgpuRenderer {
             backdrop_params_buffers: Vec::new(),
             backdrop_blur_weight_bind_groups: RefCell::new(Vec::new()),
             backdrop_bind_groups: RefCell::new(Vec::new()),
+            external_image_bind_groups: RefCell::new(HashMap::new()),
+            atlas_bind_groups: RefCell::new(HashMap::new()),
+            #[cfg(feature = "test-support")]
+            external_image_bind_group_creations: Cell::new(0),
+            #[cfg(feature = "test-support")]
+            atlas_bind_group_creations: Cell::new(0),
         };
 
         Ok(Self {
@@ -932,6 +971,7 @@ impl WgpuRenderer {
             needs_redraw: false,
             probe_inflight: None,
             probe_values: [None; MAX_LUMINANCE_PROBES],
+            wait_for_probes: false,
         })
     }
 
@@ -1669,27 +1709,6 @@ impl WgpuRenderer {
             let Some(resources) = self.resources.as_mut() else {
                 return;
             };
-
-            // Wait for any in-flight GPU work to complete before destroying textures
-            if let Err(e) = resources.device.poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            }) {
-                warn!("Failed to poll device during resize: {e:?}");
-            }
-
-            // Destroy old textures before allocating new ones to avoid GPU memory spikes
-            if let Some(ref texture) = resources.path_intermediate_texture {
-                texture.destroy();
-            }
-            if let Some(ref texture) = resources.path_msaa_texture {
-                texture.destroy();
-            }
-            if let Some(textures) = resources.backdrop_textures.as_ref() {
-                textures._scene.destroy();
-                textures._horizontal.destroy();
-                textures.vertical.destroy();
-            }
 
             if let Some(surface) = resources.surface.as_ref() {
                 surface.configure(&resources.device, &surface_config);
@@ -2906,7 +2925,8 @@ impl WgpuRenderer {
             let Some(inflight) = &self.probe_inflight else {
                 return;
             };
-            if !inflight.mapped.load(std::sync::atomic::Ordering::Acquire)
+            if self.wait_for_probes
+                && !inflight.mapped.load(std::sync::atomic::Ordering::Acquire)
                 && let Some(resources) = &self.resources
             {
                 let _ = resources.device.poll(wgpu::PollType::Wait {
@@ -3177,10 +3197,29 @@ impl WgpuRenderer {
         &self,
         scene: &Scene,
     ) -> Result<HashMap<ExternalImageId, wgpu::BindGroup>> {
+        let live_ids = scene
+            .external_images
+            .iter()
+            .map(|painted| painted.image.id())
+            .collect::<std::collections::HashSet<_>>();
+        self.resources()
+            .external_image_bind_groups
+            .borrow_mut()
+            .retain(|image_id, _| live_ids.contains(image_id));
         let mut bind_groups = HashMap::new();
         for painted in &scene.external_images {
             let image_id = painted.image.id();
             if bind_groups.contains_key(&image_id) {
+                continue;
+            }
+            if let Some(bind_group) = self
+                .resources()
+                .external_image_bind_groups
+                .borrow()
+                .get(&image_id)
+                .cloned()
+            {
+                bind_groups.insert(image_id, bind_group);
                 continue;
             }
             let payload = painted
@@ -3203,6 +3242,14 @@ impl WgpuRenderer {
                 "external image texture validation failed",
                 Arc::clone(&self.last_error),
             );
+            self.resources()
+                .external_image_bind_groups
+                .borrow_mut()
+                .insert(image_id, bind_group.clone());
+            #[cfg(feature = "test-support")]
+            self.resources()
+                .external_image_bind_group_creations
+                .set(self.resources().external_image_bind_group_creations.get() + 1);
             bind_groups.insert(image_id, bind_group);
         }
         Ok(bind_groups)
@@ -3239,21 +3286,25 @@ impl WgpuRenderer {
             return;
         }
         let texture_info = self.atlas.get_texture_info(texture_id);
-        self.draw_texture_sprites(sprite_instances, &texture_info.view, pipeline, range, pass);
-    }
-
-    fn draw_texture_sprites(
-        &self,
-        sprite_instances: &InstanceBinding,
-        texture_view: &wgpu::TextureView,
-        pipeline: &wgpu::RenderPipeline,
-        range: Range<u32>,
-        pass: &mut wgpu::RenderPass<'_>,
-    ) {
-        if range.is_empty() {
-            return;
-        }
-        let texture = self.create_texture_bind_group("sprite_texture_bind_group", texture_view);
+        let key = (texture_info.generation, texture_id);
+        let texture = self
+            .resources()
+            .atlas_bind_groups
+            .borrow()
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| {
+                let bind_group =
+                    self.create_texture_bind_group("sprite_texture_bind_group", &texture_info.view);
+                let mut cache = self.resources().atlas_bind_groups.borrow_mut();
+                cache.retain(|(generation, _), _| *generation == texture_info.generation);
+                cache.insert(key, bind_group.clone());
+                #[cfg(feature = "test-support")]
+                self.resources()
+                    .atlas_bind_group_creations
+                    .set(self.resources().atlas_bind_group_creations.get() + 1);
+                bind_group
+            });
         self.draw_bound_texture_sprites(sprite_instances, &texture, pipeline, range, pass);
     }
 
@@ -3859,7 +3910,8 @@ impl WgpuHeadlessRenderer {
         crate::assert_serialised_gpu_test();
         let context = WgpuContext::new_headless()?;
         let atlas = Arc::new(WgpuAtlas::from_context(&context));
-        let renderer = WgpuRenderer::new_headless(&context, atlas)?;
+        let mut renderer = WgpuRenderer::new_headless(&context, atlas)?;
+        renderer.wait_for_probes = true;
         Ok(Self { renderer })
     }
 
@@ -3873,7 +3925,8 @@ impl WgpuHeadlessRenderer {
     ) -> anyhow::Result<Self> {
         let context = WgpuContext::from_external(instance, adapter, device, queue)?;
         let atlas = Arc::new(WgpuAtlas::from_context(&context));
-        let renderer = WgpuRenderer::new_headless_with_format(&context, atlas, target_format)?;
+        let mut renderer = WgpuRenderer::new_headless_with_format(&context, atlas, target_format)?;
+        renderer.wait_for_probes = true;
         Ok(Self { renderer })
     }
 
@@ -3885,6 +3938,11 @@ impl WgpuHeadlessRenderer {
         target_view: &wgpu::TextureView,
     ) -> anyhow::Result<()> {
         self.renderer.render_scene_to_view(scene, size, target_view)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn cache_stats(&self) -> WgpuRenderCacheStats {
+        self.renderer.cache_stats()
     }
 }
 

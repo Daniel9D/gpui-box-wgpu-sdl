@@ -458,6 +458,16 @@ impl WgpuRuntime {
         })
     }
 
+    /// Returns renderer cache diagnostics for validation builds.
+    #[cfg(feature = "test-support")]
+    pub fn render_cache_stats(
+        &self,
+        window: WgpuWindow,
+    ) -> anyhow::Result<crate::WgpuRenderCacheStats> {
+        let key = self.window_key(window)?;
+        Ok(self.windows[key].render.borrow().renderer.cache_stats())
+    }
+
     pub fn pump(&mut self) {
         self.dispatcher.run_ready_main_tasks();
     }

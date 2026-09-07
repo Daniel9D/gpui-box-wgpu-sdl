@@ -101,4 +101,12 @@ impl WgpuHost {
         self.runtime
             .render_window(self.window, target, physical_size, scale_factor)
     }
+
+    /// Returns renderer cache diagnostics for validation builds.
+    #[cfg(feature = "test-support")]
+    pub fn render_cache_stats(&self) -> crate::WgpuRenderCacheStats {
+        self.runtime
+            .render_cache_stats(self.window)
+            .expect("the compatibility window remains open for the host lifetime")
+    }
 }

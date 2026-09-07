@@ -222,6 +222,8 @@ fn external_texture_view_updates_without_recreating_image() {
     });
     let target_view = target.create_view(&Default::default());
     let root_image = image.clone();
+    let root = Rc::new(RefCell::new(None));
+    let built_root = Rc::clone(&root);
     let mut host = WgpuHost::new(
         ExternalGpu {
             instance,
@@ -234,9 +236,11 @@ fn external_texture_view_updates_without_recreating_image() {
         Arc::new(CosmicTextSystem::new_without_system_fonts("sans-serif")),
         Arc::new(()),
         move |_, cx| {
-            cx.new(|_| ExternalImageView {
+            let entity = cx.new(|_| ExternalImageView {
                 image: root_image.into(),
-            })
+            });
+            *built_root.borrow_mut() = Some(entity.clone());
+            entity
         },
     )
     .unwrap();
@@ -245,11 +249,51 @@ fn external_texture_view_updates_without_recreating_image() {
     host.render_to_view(&target_view, EXTENT, 1.).unwrap();
     let red = read_texture(&device, &queue, &target, EXTENT);
     assert_color_near(pixel(&red, EXTENT.width, 128, 64), [255, 0, 0, 255]);
+    #[cfg(feature = "test-support")]
+    assert_eq!(
+        host.render_cache_stats()
+            .external_image_bind_group_creations,
+        1
+    );
 
     write_solid_texture(&queue, &source, source_extent, [0, 255, 0, 255]);
     host.render_to_view(&target_view, EXTENT, 1.).unwrap();
     let green = read_texture(&device, &queue, &target, EXTENT);
     assert_color_near(pixel(&green, EXTENT.width, 128, 64), [0, 255, 0, 255]);
+    #[cfg(feature = "test-support")]
+    {
+        let stats = host.render_cache_stats();
+        assert_eq!(stats.external_image_bind_group_creations, 1);
+        assert_eq!(stats.external_image_bind_groups, 1);
+
+        let replacement = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("replacement_external_image"),
+            size: source_extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        write_solid_texture(&queue, &replacement, source_extent, [0, 0, 255, 255]);
+        let replacement = WgpuImage::new(replacement.create_view(&Default::default())).unwrap();
+        let root = root.borrow().as_ref().unwrap().clone();
+        host.update(|_, cx| {
+            root.update(cx, |view, cx| {
+                view.image = replacement.into();
+                cx.notify();
+            });
+        })
+        .unwrap();
+        host.render_to_view(&target_view, EXTENT, 1.).unwrap();
+        let blue = read_texture(&device, &queue, &target, EXTENT);
+        assert_color_near(pixel(&blue, EXTENT.width, 128, 64), [0, 0, 255, 255]);
+        let stats = host.render_cache_stats();
+        assert_eq!(stats.external_image_bind_group_creations, 2);
+        assert_eq!(stats.external_image_bind_groups, 1);
+    }
+    drop(root.borrow_mut().take());
 }
 
 #[test]

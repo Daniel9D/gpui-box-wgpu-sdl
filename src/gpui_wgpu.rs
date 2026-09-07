@@ -28,6 +28,8 @@ pub use wgpu_host::*;
 pub use wgpu_image::*;
 #[cfg(not(target_family = "wasm"))]
 pub use wgpu_renderer::WgpuHeadlessRenderer;
+#[cfg(all(not(target_family = "wasm"), feature = "test-support"))]
+pub use wgpu_renderer::WgpuRenderCacheStats;
 pub use wgpu_renderer::{GpuContext, WgpuRenderer, WgpuSurfaceConfig};
 #[cfg(all(not(target_family = "wasm"), feature = "host"))]
 pub use wgpu_runtime::*;
