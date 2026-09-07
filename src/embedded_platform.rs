@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    ops::Range,
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::Arc,
@@ -51,6 +52,7 @@ pub(crate) struct EmbeddedPlatform {
     cursor: Cell<CursorStyle>,
     cursor_visible: Cell<bool>,
     clipboard: RefCell<Option<ClipboardItem>>,
+    system_wake: RefCell<Option<Box<dyn FnMut()>>>,
     weak: Weak<Self>,
 }
 
@@ -102,6 +104,7 @@ impl EmbeddedPlatform {
             cursor: Cell::new(CursorStyle::Arrow),
             cursor_visible: Cell::new(true),
             clipboard: RefCell::new(None),
+            system_wake: RefCell::new(None),
             weak: weak.clone(),
         })
     }
@@ -188,6 +191,67 @@ impl EmbeddedPlatform {
         Ok(())
     }
 
+    pub(crate) fn dispatch_input(
+        &self,
+        handle: AnyWindowHandle,
+        input: PlatformInput,
+    ) -> Result<DispatchEventResult> {
+        let window = self
+            .window(handle)
+            .ok_or_else(|| anyhow::anyhow!("window is closed"))?;
+        {
+            let mut state = window.0.borrow_mut();
+            match &input {
+                PlatformInput::MouseMove(event) => {
+                    state.mouse_position = event.position;
+                    state.modifiers = event.modifiers;
+                    self.cursor_visible.set(true);
+                }
+                PlatformInput::ModifiersChanged(event) => {
+                    state.modifiers = event.modifiers;
+                    state.capslock = event.capslock;
+                }
+                _ => {}
+            }
+        }
+        let callback = window.0.borrow_mut().input.take();
+        let result = callback.map(|mut callback| {
+            let result = callback(input);
+            if let Ok(mut state) = window.0.try_borrow_mut() {
+                state.input = Some(callback);
+            }
+            result
+        });
+        Ok(result.unwrap_or_default())
+    }
+
+    pub(crate) fn set_hovered(&self, handle: AnyWindowHandle, hovered: bool) -> Result<()> {
+        self.window(handle)
+            .ok_or_else(|| anyhow::anyhow!("window is closed"))?
+            .set_hovered(hovered);
+        Ok(())
+    }
+
+    pub(crate) fn wake(&self) {
+        let callback = self.system_wake.borrow_mut().take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.system_wake.replace(Some(callback));
+        }
+    }
+
+    pub(crate) fn set_clipboard_text(&self, text: String) {
+        self.clipboard
+            .replace(Some(ClipboardItem::new_string(text)));
+    }
+
+    pub(crate) fn clipboard_text(&self) -> Option<String> {
+        self.clipboard
+            .borrow()
+            .as_ref()
+            .and_then(ClipboardItem::text)
+    }
+
     pub(crate) fn cursor_style(&self) -> CursorStyle {
         self.cursor.get()
     }
@@ -198,6 +262,10 @@ impl EmbeddedPlatform {
 }
 
 impl EmbeddedWindow {
+    pub(crate) fn set_render_callback(&self, callback: RenderCallback) {
+        self.0.borrow_mut().render = Some(callback);
+    }
+
     fn set_active(&self, active: bool) {
         let callback = {
             let mut state = self.0.borrow_mut();
@@ -211,6 +279,47 @@ impl EmbeddedWindow {
             callback(active);
             if let Ok(mut state) = self.0.try_borrow_mut() {
                 state.active_changed = Some(callback);
+            }
+        }
+    }
+
+    fn set_hovered(&self, hovered: bool) {
+        let callback = {
+            let mut state = self.0.borrow_mut();
+            if state.hovered == hovered {
+                return;
+            }
+            state.hovered = hovered;
+            state.hovered_changed.take()
+        };
+        if let Some(mut callback) = callback {
+            callback(hovered);
+            if let Ok(mut state) = self.0.try_borrow_mut() {
+                state.hovered_changed = Some(callback);
+            }
+        }
+    }
+
+    pub(crate) fn dispatch_text(&self, text: &str) {
+        self.with_input_handler(|handler| handler.replace_text_in_range(None, text));
+    }
+
+    pub(crate) fn dispatch_text_editing(&self, text: &str, selection_utf16: Option<Range<usize>>) {
+        self.with_input_handler(|handler| {
+            handler.replace_and_mark_text_in_range(None, text, selection_utf16)
+        });
+    }
+
+    fn with_input_handler(&self, update: impl FnOnce(&mut PlatformInputHandler)) {
+        let handler = self.0.borrow_mut().input_handler.take();
+        if let Some(mut handler) = handler {
+            update(&mut handler);
+            let ime_area = handler.ime_candidate_bounds();
+            if let Ok(mut state) = self.0.try_borrow_mut() {
+                state.ime_area = ime_area;
+                if state.input_handler.is_none() {
+                    state.input_handler = Some(handler);
+                }
             }
         }
     }
@@ -370,7 +479,9 @@ impl Platform for EmbeddedPlatform {
     fn reveal_path(&self, _: &Path) {}
     fn on_quit(&self, _: Box<dyn FnMut()>) {}
     fn on_reopen(&self, _: Box<dyn FnMut()>) {}
-    fn on_system_wake(&self, _: Box<dyn FnMut()>) {}
+    fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
+        self.system_wake.replace(Some(callback));
+    }
     fn set_menus(&self, _: Vec<Menu>, _: &Keymap) {}
     fn set_dock_menu(&self, _: Vec<MenuItem>, _: &Keymap) {}
     fn on_app_menu_action(&self, _: Box<dyn FnMut(&dyn Action)>) {}

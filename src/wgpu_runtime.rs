@@ -1,9 +1,12 @@
-use std::{borrow::Cow, ops::Range, rc::Rc, sync::Arc};
+use std::{borrow::Cow, cell::RefCell, ops::Range, rc::Rc, sync::Arc};
 
+use gpui::AppContext as _;
 use gpui::{AssetSource, WindowBounds, WindowOptions};
 use slotmap::{Key as _, KeyData, SlotMap, new_key_type};
 
-use crate::{EmbeddedDisplay, EmbeddedPlatform, ExternalGpu, WgpuAtlas};
+use crate::{
+    EmbeddedDisplay, EmbeddedPlatform, ExternalGpu, WgpuAtlas, WgpuContext, WgpuHeadlessRenderer,
+};
 
 new_key_type! { struct RuntimeWindowKey; }
 
@@ -13,12 +16,30 @@ pub struct WgpuWindow {
     key: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WgpuWindowState {
     pub cursor_style: gpui::CursorStyle,
     pub cursor_visible: bool,
     pub text_input_active: bool,
     pub ime_area: Option<gpui::Bounds<gpui::Pixels>>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WgpuWindowError {
+    ForeignRuntime,
+    Closed,
+}
+
+impl std::fmt::Display for WgpuWindowError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ForeignRuntime => formatter.write_str("window belongs to another WgpuRuntime"),
+            Self::Closed => formatter.write_str("window is closed"),
+        }
+    }
+}
+
+impl std::error::Error for WgpuWindowError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CloseOutcome {
@@ -34,12 +55,30 @@ pub struct TextPreedit {
 
 pub struct WgpuRuntime {
     runtime_id: u64,
-    _gpu: ExternalGpu,
-    _target_format: wgpu::TextureFormat,
+    context: WgpuContext,
+    atlas: Arc<WgpuAtlas>,
+    target_format: wgpu::TextureFormat,
     dispatcher: Arc<gpui::ThreadedDispatcher>,
     platform: Rc<EmbeddedPlatform>,
     app: gpui::ApplicationHandle,
-    windows: SlotMap<RuntimeWindowKey, gpui::AnyWindowHandle>,
+    windows: SlotMap<RuntimeWindowKey, RuntimeWindow>,
+}
+
+struct RuntimeWindow {
+    handle: gpui::AnyWindowHandle,
+    render: Rc<RefCell<WindowRenderState>>,
+    redraw_pending: bool,
+}
+
+struct WindowRenderTarget {
+    view: wgpu::TextureView,
+    size: gpui::Size<gpui::DevicePixels>,
+}
+
+struct WindowRenderState {
+    renderer: WgpuHeadlessRenderer,
+    target: Option<WindowRenderTarget>,
+    error: Option<anyhow::Error>,
 }
 
 pub struct WgpuRuntimeBuilder {
@@ -58,15 +97,12 @@ impl WgpuRuntime {
     ) -> anyhow::Result<Self> {
         static NEXT_RUNTIME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let dispatcher = Arc::new(gpui::ThreadedDispatcher::new());
-        let atlas: Arc<dyn gpui::PlatformAtlas> = Arc::new(WgpuAtlas::new(
-            gpu.device.clone(),
-            gpu.queue.clone(),
-            target_format,
-        ));
+        let context = WgpuContext::from_external(gpu.instance, gpu.adapter, gpu.device, gpu.queue)?;
+        let atlas = Arc::new(WgpuAtlas::from_context(&context));
         let platform = EmbeddedPlatform::new(
             dispatcher.clone(),
             text_system,
-            atlas,
+            atlas.clone(),
             Rc::new(EmbeddedDisplay),
         );
         let app = gpui::Application::new_inaccessible(platform.clone())
@@ -75,8 +111,9 @@ impl WgpuRuntime {
             .run_embedded(|_| {});
         Ok(Self {
             runtime_id: NEXT_RUNTIME_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            _gpu: gpu,
-            _target_format: target_format,
+            context,
+            atlas,
+            target_format,
             dispatcher,
             platform,
             app,
@@ -126,7 +163,36 @@ impl WgpuRuntime {
                 },
             )
         })?;
-        let key = self.windows.insert(handle.into());
+        let handle = handle.into();
+        let render = Rc::new(RefCell::new(WindowRenderState {
+            renderer: WgpuHeadlessRenderer::from_context(
+                &self.context,
+                self.atlas.clone(),
+                self.target_format,
+            )?,
+            target: None,
+            error: None,
+        }));
+        let render_callback = render.clone();
+        self.platform
+            .window(handle)
+            .expect("the embedded platform owns every open GPUI window")
+            .set_render_callback(Box::new(move |scene| {
+                let mut state = render_callback.borrow_mut();
+                let Some(target) = state.target.as_ref() else {
+                    return;
+                };
+                let view = target.view.clone();
+                let size = target.size;
+                if let Err(error) = state.renderer.render_scene_to_view(scene, size, &view) {
+                    state.error = Some(error);
+                }
+            }));
+        let key = self.windows.insert(RuntimeWindow {
+            handle,
+            render,
+            redraw_pending: true,
+        });
         Ok((
             WgpuWindow {
                 runtime_id: self.runtime_id,
@@ -139,7 +205,7 @@ impl WgpuRuntime {
     pub fn render_window(
         &mut self,
         window: WgpuWindow,
-        _target: &wgpu::TextureView,
+        target: &wgpu::TextureView,
         physical_size: wgpu::Extent3d,
         scale_factor: f32,
     ) -> anyhow::Result<()> {
@@ -153,7 +219,12 @@ impl WgpuRuntime {
             scale_factor.is_finite() && scale_factor > 0.0,
             "scale factor must be positive and finite"
         );
-        let handle = self.window_handle(window)?;
+        let key = self.window_key(window)?;
+        let handle = self.windows[key].handle;
+        let width = i32::try_from(physical_size.width)
+            .map_err(|_| anyhow::anyhow!("target width exceeds GPUI limits"))?;
+        let height = i32::try_from(physical_size.height)
+            .map_err(|_| anyhow::anyhow!("target height exceeds GPUI limits"))?;
         self.platform.resize(
             handle,
             gpui::size(
@@ -162,6 +233,14 @@ impl WgpuRuntime {
             ),
             scale_factor,
         )?;
+        {
+            let mut render = self.windows[key].render.borrow_mut();
+            render.error = None;
+            render.target = Some(WindowRenderTarget {
+                view: target.clone(),
+                size: gpui::size(gpui::DevicePixels(width), gpui::DevicePixels(height)),
+            });
+        }
         self.platform.request_frame(
             handle,
             gpui::RequestFrameOptions {
@@ -169,12 +248,136 @@ impl WgpuRuntime {
                 force_render: true,
             },
         )?;
-        anyhow::bail!("embedded rendering is not connected yet")
+        self.pump();
+        let mut render = self.windows[key].render.borrow_mut();
+        render.target = None;
+        if let Some(error) = render.error.take() {
+            return Err(error);
+        }
+        drop(render);
+        self.windows[key].redraw_pending = false;
+        Ok(())
+    }
+
+    pub fn update_window<R>(
+        &mut self,
+        window: WgpuWindow,
+        update: impl FnOnce(&mut gpui::Window, &mut gpui::App) -> R,
+    ) -> anyhow::Result<R> {
+        let handle = self.window_handle(window)?;
+        self.app
+            .update(|cx| cx.update_window(handle, |_, window, cx| update(window, cx)))
+    }
+
+    pub fn resize_window(
+        &mut self,
+        window: WgpuWindow,
+        logical_size: gpui::Size<gpui::Pixels>,
+        scale_factor: f32,
+    ) -> anyhow::Result<()> {
+        let width = logical_size.width.as_f32();
+        let height = logical_size.height.as_f32();
+        anyhow::ensure!(
+            width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0,
+            "logical window dimensions must be positive and finite"
+        );
+        let key = self.window_key(window)?;
+        self.platform
+            .resize(self.windows[key].handle, logical_size, scale_factor)?;
+        self.windows[key].redraw_pending = true;
+        Ok(())
+    }
+
+    pub fn dispatch(
+        &mut self,
+        window: WgpuWindow,
+        input: gpui::PlatformInput,
+    ) -> anyhow::Result<gpui::DispatchEventResult> {
+        let key = self.window_key(window)?;
+        let result = self
+            .platform
+            .dispatch_input(self.windows[key].handle, input)?;
+        self.windows[key].redraw_pending = true;
+        self.pump();
+        Ok(result)
+    }
+
+    pub fn dispatch_text(&mut self, window: WgpuWindow, text: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!text.is_empty(), "committed text must not be empty");
+        let key = self.window_key(window)?;
+        self.platform
+            .window(self.windows[key].handle)
+            .ok_or(WgpuWindowError::Closed)?
+            .dispatch_text(text);
+        self.windows[key].redraw_pending = true;
+        self.pump();
+        Ok(())
+    }
+
+    pub fn dispatch_text_editing(
+        &mut self,
+        window: WgpuWindow,
+        editing: TextPreedit,
+    ) -> anyhow::Result<()> {
+        let key = self.window_key(window)?;
+        self.platform
+            .window(self.windows[key].handle)
+            .ok_or(WgpuWindowError::Closed)?
+            .dispatch_text_editing(&editing.text, editing.selection_utf16);
+        self.windows[key].redraw_pending = true;
+        self.pump();
+        Ok(())
+    }
+
+    pub fn set_window_focus(&mut self, window: WgpuWindow, focused: bool) -> anyhow::Result<()> {
+        let key = self.window_key(window)?;
+        self.platform
+            .set_active(self.windows[key].handle, focused)?;
+        self.windows[key].redraw_pending = true;
+        self.pump();
+        Ok(())
+    }
+
+    pub fn set_window_hovered(&mut self, window: WgpuWindow, hovered: bool) -> anyhow::Result<()> {
+        let key = self.window_key(window)?;
+        self.platform
+            .set_hovered(self.windows[key].handle, hovered)?;
+        self.windows[key].redraw_pending = true;
+        self.pump();
+        Ok(())
+    }
+
+    pub fn wake(&mut self) {
+        self.platform.wake();
+        self.pump();
+        for window in self.windows.values_mut() {
+            window.redraw_pending = true;
+        }
+    }
+
+    pub fn take_redraw_requests(&mut self) -> Vec<WgpuWindow> {
+        self.windows
+            .iter_mut()
+            .filter_map(|(key, entry)| {
+                std::mem::take(&mut entry.redraw_pending).then_some(WgpuWindow {
+                    runtime_id: self.runtime_id,
+                    key: key.data().as_ffi(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn set_clipboard_text(&self, text: String) {
+        self.platform.set_clipboard_text(text);
+    }
+
+    pub fn clipboard_text(&self) -> Option<String> {
+        self.platform.clipboard_text()
     }
 
     pub fn close_window(&mut self, window: WgpuWindow) -> anyhow::Result<()> {
         let key = self.window_key(window)?;
-        self.platform.force_close(self.windows[key])?;
+        self.platform.force_close(self.windows[key].handle)?;
         self.windows.remove(key);
         self.pump();
         Ok(())
@@ -182,7 +385,7 @@ impl WgpuRuntime {
 
     pub fn request_close_window(&mut self, window: WgpuWindow) -> anyhow::Result<CloseOutcome> {
         let key = self.window_key(window)?;
-        let handle = self.windows[key];
+        let handle = self.windows[key].handle;
         self.platform.request_close(handle)?;
         self.pump();
         if self.platform.window(handle).is_some() {
@@ -211,17 +414,18 @@ impl WgpuRuntime {
     }
 
     fn window_key(&self, window: WgpuWindow) -> anyhow::Result<RuntimeWindowKey> {
-        anyhow::ensure!(
-            window.runtime_id == self.runtime_id,
-            "window belongs to another WgpuRuntime"
-        );
+        if window.runtime_id != self.runtime_id {
+            return Err(WgpuWindowError::ForeignRuntime.into());
+        }
         let key = RuntimeWindowKey::from(KeyData::from_ffi(window.key));
-        anyhow::ensure!(self.windows.contains_key(key), "window is closed");
+        if !self.windows.contains_key(key) {
+            return Err(WgpuWindowError::Closed.into());
+        }
         Ok(key)
     }
 
     fn window_handle(&self, window: WgpuWindow) -> anyhow::Result<gpui::AnyWindowHandle> {
-        Ok(self.windows[self.window_key(window)?])
+        Ok(self.windows[self.window_key(window)?].handle)
     }
 }
 

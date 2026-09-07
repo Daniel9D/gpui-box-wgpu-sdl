@@ -139,6 +139,7 @@ impl SdlPlatformBridge {
 
     /// Imports the current SDL clipboard before dispatching paste input to GPUI.
     #[cfg(feature = "wgpu-runtime")]
+    #[deprecated(note = "use pull_runtime_clipboard with WgpuRuntime")]
     pub fn pull_clipboard(&mut self, host: &mut gpui_wgpu::WgpuHost) -> anyhow::Result<()> {
         let text = clipboard_text()?;
         host.set_clipboard_text(text.clone());
@@ -148,6 +149,7 @@ impl SdlPlatformBridge {
 
     /// Exports changed GPUI clipboard text after dispatching input or actions.
     #[cfg(feature = "wgpu-runtime")]
+    #[deprecated(note = "use push_runtime_clipboard with WgpuRuntime")]
     pub fn push_clipboard(&mut self, host: &mut gpui_wgpu::WgpuHost) -> anyhow::Result<()> {
         let Some(text) = host.clipboard_text() else {
             return Ok(());
@@ -161,9 +163,89 @@ impl SdlPlatformBridge {
 
     /// Applies the host cursor state after input dispatch or a rendered frame.
     #[cfg(feature = "wgpu-runtime")]
+    #[deprecated(note = "use sync_runtime_cursor with WgpuRuntime")]
     pub fn sync_cursor(&mut self, host: &gpui_wgpu::WgpuHost) -> anyhow::Result<()> {
         self.cursor
             .apply(host.cursor_style(), host.is_cursor_visible())
+    }
+
+    /// Imports SDL's UTF-8 clipboard into the shared embedded runtime.
+    #[cfg(feature = "wgpu-runtime")]
+    pub fn pull_runtime_clipboard(
+        &mut self,
+        runtime: &gpui_wgpu::WgpuRuntime,
+    ) -> anyhow::Result<()> {
+        let text = clipboard_text()?;
+        runtime.set_clipboard_text(text.clone());
+        self.last_clipboard = Some(text);
+        Ok(())
+    }
+
+    /// Exports changed UTF-8 text from the embedded runtime to SDL.
+    #[cfg(feature = "wgpu-runtime")]
+    pub fn push_runtime_clipboard(
+        &mut self,
+        runtime: &gpui_wgpu::WgpuRuntime,
+    ) -> anyhow::Result<()> {
+        let Some(text) = runtime.clipboard_text() else {
+            return Ok(());
+        };
+        if self.last_clipboard.as_ref() != Some(&text) {
+            set_clipboard_text(&text)?;
+            self.last_clipboard = Some(text);
+        }
+        Ok(())
+    }
+
+    /// Applies the cursor requested by one runtime window on SDL's main thread.
+    #[cfg(feature = "wgpu-runtime")]
+    pub fn sync_runtime_cursor(
+        &mut self,
+        runtime: &gpui_wgpu::WgpuRuntime,
+        window: gpui_wgpu::WgpuWindow,
+    ) -> anyhow::Result<()> {
+        let state = runtime.window_state(window)?;
+        self.cursor.apply(state.cursor_style, state.cursor_visible)
+    }
+
+    /// Dispatches one window-scoped SDL adapter event to an embedded GPUI window.
+    #[cfg(feature = "wgpu-runtime")]
+    pub fn dispatch_runtime_event(
+        &mut self,
+        runtime: &mut gpui_wgpu::WgpuRuntime,
+        window: gpui_wgpu::WgpuWindow,
+        event: crate::SdlHostEvent,
+        scale_factor: f32,
+    ) -> anyhow::Result<()> {
+        match event {
+            crate::SdlHostEvent::Input(input) => {
+                runtime.dispatch(window, input)?;
+            }
+            crate::SdlHostEvent::TextInput(text) => runtime.dispatch_text(window, &text)?,
+            crate::SdlHostEvent::TextEditing(editing) => {
+                let selection_utf16 = editing.selection_utf16();
+                runtime.dispatch_text_editing(
+                    window,
+                    gpui_wgpu::TextPreedit {
+                        text: editing.text,
+                        selection_utf16,
+                    },
+                )?;
+            }
+            crate::SdlHostEvent::WindowResized { width, height } => runtime.resize_window(
+                window,
+                gpui::size(
+                    gpui::px(width as f32 / scale_factor),
+                    gpui::px(height as f32 / scale_factor),
+                ),
+                scale_factor,
+            )?,
+            crate::SdlHostEvent::FocusChanged(focused) => {
+                runtime.set_window_focus(window, focused)?;
+            }
+            crate::SdlHostEvent::Quit => {}
+        }
+        Ok(())
     }
 }
 

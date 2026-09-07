@@ -3840,6 +3840,15 @@ pub struct WgpuHeadlessRenderer {
 
 #[cfg(not(target_family = "wasm"))]
 impl WgpuHeadlessRenderer {
+    pub(crate) fn from_context(
+        context: &WgpuContext,
+        atlas: Arc<WgpuAtlas>,
+        target_format: wgpu::TextureFormat,
+    ) -> anyhow::Result<Self> {
+        let renderer = WgpuRenderer::new_headless_with_format(context, atlas, target_format)?;
+        Ok(Self { renderer })
+    }
+
     #[cfg(feature = "host")]
     pub(crate) fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()

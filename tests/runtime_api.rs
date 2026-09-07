@@ -7,20 +7,23 @@ use gpui_wgpu::{
     WgpuWindowState,
 };
 
+type RuntimeConstructor = fn(
+    ExternalGpu,
+    wgpu::TextureFormat,
+    Arc<dyn gpui::PlatformTextSystem>,
+    Arc<dyn gpui::AssetSource>,
+) -> anyhow::Result<WgpuRuntime>;
+type RuntimeBuilderConstructor = fn(
+    ExternalGpu,
+    wgpu::TextureFormat,
+    Arc<dyn gpui::PlatformTextSystem>,
+    Arc<dyn gpui::AssetSource>,
+) -> WgpuRuntimeBuilder;
+
 #[test]
 fn multi_window_runtime_public_contract_is_available() {
-    let _new: fn(
-        ExternalGpu,
-        wgpu::TextureFormat,
-        Arc<dyn gpui::PlatformTextSystem>,
-        Arc<dyn gpui::AssetSource>,
-    ) -> anyhow::Result<WgpuRuntime> = WgpuRuntime::new;
-    let _builder: fn(
-        ExternalGpu,
-        wgpu::TextureFormat,
-        Arc<dyn gpui::PlatformTextSystem>,
-        Arc<dyn gpui::AssetSource>,
-    ) -> WgpuRuntimeBuilder = WgpuRuntime::builder;
+    let _new: RuntimeConstructor = WgpuRuntime::new;
+    let _builder: RuntimeBuilderConstructor = WgpuRuntime::builder;
 
     fn assert_window_traits<T: Clone + Copy + std::fmt::Debug + Eq + std::hash::Hash>() {}
     assert_window_traits::<WgpuWindow>();

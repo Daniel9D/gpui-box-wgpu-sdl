@@ -1,4 +1,4 @@
-#![cfg(not(target_family = "wasm"))]
+#![cfg(all(not(target_family = "wasm"), feature = "wgpu-runtime"))]
 
 use std::{
     cell::{Cell, RefCell},
