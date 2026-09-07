@@ -19,12 +19,26 @@ pub struct ExternalImageId(pub usize);
 pub struct ExternalImageHandle {
     id: ExternalImageId,
     size: Size<DevicePixels>,
+    #[cfg(not(target_family = "wasm"))]
     payload: Arc<dyn Any + Send + Sync>,
+    #[cfg(target_family = "wasm")]
+    payload: Arc<dyn Any>,
 }
 
 impl ExternalImageHandle {
     /// Creates an external image with its intrinsic physical size.
+    #[cfg(not(target_family = "wasm"))]
     pub fn new<T: Any + Send + Sync>(size: Size<DevicePixels>, payload: T) -> Self {
+        Self {
+            id: ExternalImageId(NEXT_EXTERNAL_IMAGE_ID.fetch_add(1, Ordering::Relaxed)),
+            size,
+            payload: Arc::new(payload),
+        }
+    }
+
+    /// Creates a main-thread WebGPU image with its intrinsic physical size.
+    #[cfg(target_family = "wasm")]
+    pub fn new<T: Any>(size: Size<DevicePixels>, payload: T) -> Self {
         Self {
             id: ExternalImageId(NEXT_EXTERNAL_IMAGE_ID.fetch_add(1, Ordering::Relaxed)),
             size,
