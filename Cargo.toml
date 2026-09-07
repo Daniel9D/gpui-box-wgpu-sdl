@@ -31,6 +31,7 @@ bytemuck = "1"
 cosmic-text = "0.19.0"
 etagere = "0.2"
 font-kit = { package = "zed-font-kit", version = "0.14.1-zed", optional = true }
+futures = "0.3"
 image = { version = "0.25.1", optional = true, default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "rayon", "tga", "tiff", "webp"] }
 itertools = "0.14.0"
 log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
@@ -38,13 +39,18 @@ parking_lot = "0.12.1"
 profiling = "1"
 raw-window-handle = "0.6"
 smallvec = { version = "1.6", features = ["union", "const_new"] }
+slotmap = "1"
 swash = "0.2.6"
 unicode-bidi = { version = "0.3.18", default-features = false, features = ["hardcoded-data"] }
 unicode-segmentation = "1.10"
+uuid = "1"
 wgpu = "30.0.1"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 pollster = "0.4.0"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = ["Win32_Foundation"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 wasm-bindgen = "0.2.120"

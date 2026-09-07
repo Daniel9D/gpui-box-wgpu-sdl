@@ -1,6 +1,10 @@
 #![doc = include_str!("../README.md")]
 
 mod cosmic_text_system;
+#[cfg(all(not(target_family = "wasm"), feature = "host"))]
+mod embedded_platform;
+#[cfg(all(test, not(target_family = "wasm"), feature = "host"))]
+mod embedded_platform_tests;
 mod wgpu_atlas;
 mod wgpu_context;
 #[cfg(all(not(target_family = "wasm"), feature = "host"))]
@@ -11,6 +15,8 @@ mod wgpu_renderer;
 mod wgpu_runtime;
 
 pub use cosmic_text_system::*;
+#[cfg(all(not(target_family = "wasm"), feature = "host"))]
+pub(crate) use embedded_platform::*;
 pub use gpui;
 #[cfg(feature = "kit")]
 pub use gpui_kit;
